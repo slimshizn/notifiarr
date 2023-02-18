@@ -67,8 +67,8 @@ require (
 	github.com/tklauser/go-sysconf v0.3.11 // indirect
 	github.com/tklauser/numcpus v0.6.0 // indirect
 	golang.org/x/mod v0.7.0
-	golang.org/x/net v0.2.0 // indirect
-	golang.org/x/sys v0.2.0
+	golang.org/x/net v0.7.0 // indirect
+	golang.org/x/sys v0.5.0
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	howett.net/plist v1.0.0 // indirect
@@ -113,7 +113,7 @@ require (
 	github.com/gorilla/websocket v1.5.0
 	github.com/nxadm/tail v1.4.9-0.20211216163028-4472660a31a6
 	golang.org/x/crypto v0.3.0
-	golang.org/x/text v0.4.0
+	golang.org/x/text v0.7.0
 	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 // indirect
 )
 
