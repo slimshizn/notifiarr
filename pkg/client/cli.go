@@ -1,12 +1,15 @@
 package client
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -15,6 +18,7 @@ import (
 	"github.com/Notifiarr/notifiarr/pkg/logs"
 	"github.com/Notifiarr/notifiarr/pkg/mnd"
 	"github.com/Notifiarr/notifiarr/pkg/services"
+	"github.com/Notifiarr/notifiarr/pkg/website"
 	"golift.io/rotatorr"
 )
 
@@ -24,10 +28,10 @@ const curlTimeout = 15 * time.Second
 
 // Errors.
 var (
-	ErrInvalidHeader = fmt.Errorf("invalid header provided; must contain a colon")
+	ErrInvalidHeader = errors.New("invalid header provided; must contain a colon")
 )
 
-// forceWriteWithExit is called only when a user passes --write on the command line.
+// forceWriteWithExit is called only when a user passes --write or --reset on the command line.
 func (c *Client) forceWriteWithExit(ctx context.Context, fileName string) error {
 	if fileName == "example" || fileName == "---" {
 		// Bubilding a default template.
@@ -40,7 +44,7 @@ func (c *Client) forceWriteWithExit(ctx context.Context, fileName string) error 
 		configfile.ForceAllTmpl = true
 	}
 
-	f, err := c.Config.Write(ctx, fileName)
+	f, err := c.Config.Write(ctx, fileName, false)
 	if err != nil {
 		return fmt.Errorf("writing config: %w", err)
 	}
@@ -48,6 +52,21 @@ func (c *Client) forceWriteWithExit(ctx context.Context, fileName string) error 
 	c.Print("Wrote Config File:", f)
 
 	return nil
+}
+
+func (c *Client) resetAdminPassword(ctx context.Context) error {
+	c.Config.SSLCrtFile = ""
+	c.Config.SSLKeyFile = ""
+
+	password := configfile.DefaultUsername + ":" + configfile.GeneratePassword()
+	if err := c.Config.UIPassword.Set(password); err != nil {
+		return fmt.Errorf("setting password failed: %w", err)
+	}
+
+	c.Printf("New '%s' user password: %s", configfile.DefaultUsername, password)
+	c.Printf("Writing Config File: %s", c.Flags.ConfigFile)
+
+	return c.saveNewConfig(ctx, c.Config)
 }
 
 // printProcessList is triggered by the --ps command line arg.
@@ -148,6 +167,63 @@ func printCurlReply(resp *http.Response, body []byte) {
 
 // Fortune returns a fortune.
 func Fortune() string {
-	fortunes := strings.Split(bindata.MustAssetString("other/fortunes.txt"), "\n%\n")
+	fortunes := strings.Split(bindata.Fortunes, "\n%\n")
 	return fortunes[rand.Intn(len(fortunes))] //nolint:gosec
+}
+
+// handleAptHook takes a payload as stdin from dpkg and relays it to notifiarr.com.
+// only useful as an apt integration on Debian-based operating systems.
+// NEVER return an error, we don't want to hang up apt.
+func (c *Client) handleAptHook(ctx context.Context) error { //nolint:cyclop
+	if !mnd.IsLinux {
+		return ErrUnsupport
+	} else if !c.Config.EnableApt {
+		return nil // apt integration is not enabled, bail.
+	}
+
+	var (
+		grab   bool
+		output struct {
+			Data    []string `json:"data"`
+			CLI     string   `json:"cli"`
+			Install int      `json:"install"`
+			Remove  int      `json:"remove"`
+		}
+	)
+
+	for scanner := bufio.NewScanner(os.Stdin); scanner.Scan(); {
+		switch line := scanner.Text(); {
+		case strings.HasPrefix(line, "CommandLine"):
+			output.CLI = line
+		case line == "":
+			grab = true // grab everything after the empty line.
+		case grab:
+			output.Data = append(output.Data, line)
+
+			if strings.HasSuffix(line, ".deb") {
+				output.Install++
+			} else if strings.HasSuffix(line, "**REMOVE**") {
+				output.Remove++
+			}
+
+			fallthrough
+		default: /* debug /**/
+			// fmt.Println("hook line", line)
+		} //nolint:wsl
+	}
+
+	resp, _, err := c.Config.RawGetData(ctx, &website.Request{
+		Route:   website.PkgRoute,
+		Event:   "apt",
+		Payload: output,
+	})
+	//nolint:forbidigo
+	if err != nil {
+		fmt.Printf("ERROR Sending Notification to notifiarr.com: %v%s\n", err, resp)
+	} else {
+		fmt.Printf("Sent notification to notifiarr.com; install: %d, remove: %d%s\n",
+			output.Install, output.Remove, resp)
+	}
+
+	return nil
 }

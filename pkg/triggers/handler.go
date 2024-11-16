@@ -1,9 +1,12 @@
 package triggers
 
 import (
+	"fmt"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Notifiarr/notifiarr/pkg/logs/share"
 	"github.com/Notifiarr/notifiarr/pkg/triggers/common"
@@ -26,16 +29,87 @@ func (a *Actions) Handler(response http.ResponseWriter, req *http.Request) {
 	http.Error(response, data, code)
 }
 
+type trigger struct {
+	Name string `json:"name"`
+	Dur  string `json:"interval,omitempty"`
+	Path string `json:"apiPath,omitempty"`
+}
+
+type timer struct {
+	Name string `json:"name"`
+	Dur  string `json:"interval"`
+	// Use this ID to trigger this timer with the trigger/custom endpoint.
+	Idx int `json:"id"`
+	// The client API path to trigger this custom timer.
+	Path string `json:"apiPath"`
+}
+
+type triggerOutput struct {
+	Triggers []*trigger `json:"triggers"`
+	Timers   []*timer   `json:"timers"`
+}
+
+// @Description  Returns a list of triggers and website timers with their intervals, if configured.
+// @Summary      Get trigger list
+// @Tags         Triggers
+// @Produce      json
+// @Success      200  {object} apps.Respond.apiResponse{message=triggers.triggerOutput} "lists of triggers and timers"
+// @Failure      404  {object} string "bad token or api key"
+// @Router       /api/triggers [get]
+// @Security     ApiKeyAuth
+func (a *Actions) HandleGetTriggers(_ *http.Request) (int, interface{}) {
+	triggers, timers := a.GatherTriggerInfo()
+	temp := make(map[string]*trigger) // used to dedup.
+
+	for name, dur := range triggers {
+		if dur.Duration == 0 {
+			temp[name] = &trigger{Name: name}
+		} else {
+			temp[name] = &trigger{Name: name, Dur: dur.String()}
+		}
+	}
+
+	for name, dur := range timers {
+		if _, ok := temp[name]; !ok {
+			temp[name] = &trigger{Name: name, Dur: dur.String()}
+		}
+	}
+
+	cronTimers := a.CronTimer.List()
+	reply := &triggerOutput{
+		Triggers: make([]*trigger, len(temp)),
+		Timers:   make([]*timer, len(cronTimers)),
+	}
+
+	idx := 0
+
+	for _, t := range temp {
+		reply.Triggers[idx] = t
+		idx++
+	}
+
+	for idx, action := range cronTimers {
+		reply.Timers[idx] = &timer{
+			Name: action.Name,
+			Dur:  action.Interval.String(),
+			Idx:  idx,
+			Path: path.Join(a.Apps.URLBase, fmt.Sprint("api/trigger/custom/", idx)),
+		}
+	}
+
+	return http.StatusOK, reply
+}
+
 // handleTrigger is an abstraction to deal with API or GUI triggers (they have different handlers).
 func (a *Actions) handleTrigger(req *http.Request, event website.EventType) (int, string) {
-	input := &common.ActionInput{Type: website.EventAPI}
+	input := &common.ActionInput{Type: event}
 	trigger := mux.Vars(req)["trigger"]
 	content := mux.Vars(req)["content"]
 
 	if content != "" {
-		a.Timers.Debugf("[%s requested] Incoming Trigger: %s (%s)", event, trigger, content)
+		a.Debugf("[%s requested] Incoming Trigger: %s (%s)", event, trigger, content)
 	} else {
-		a.Timers.Debugf("[%s requested] Incoming Trigger: %s", event, trigger)
+		a.Debugf("[%s requested] Incoming Trigger: %s", event, trigger)
 	}
 
 	_ = req.ParseForm()
@@ -46,6 +120,8 @@ func (a *Actions) handleTrigger(req *http.Request, event website.EventType) (int
 
 func (a *Actions) runTrigger(input *common.ActionInput, trigger, content string) (int, string) { //nolint:cyclop
 	switch trigger {
+	case "custom":
+		return a.customTimer(input, content)
 	case "clientlogs":
 		return a.clientLogs(content)
 	case "command":
@@ -76,9 +152,36 @@ func (a *Actions) runTrigger(input *common.ActionInput, trigger, content string)
 		return a.notification(content)
 	case "emptyplextrash":
 		return a.emptyplextrash(input, content)
+	case "mdblist":
+		return a.mdblist(input)
+	case "uploadlog":
+		return a.uploadlog(input, content)
 	default:
 		return http.StatusBadRequest, "Unknown trigger provided:'" + trigger + "'"
 	}
+}
+
+// @Description  Trigger a custom website timer. This sends a GET request to trigger an action on the website.
+// @Summary      Trigger custom timer
+// @Tags         Triggers
+// @Produce      json
+// @Param        idx  path   int  true  "ID of the custom website timer to trigger"
+// @Success      200  {object} apps.Respond.apiResponse{message=string} "success: name of timer"
+// @Failure      400  {object} string "invalid timer ID"
+// @Failure      404  {object} string "bad token or api key"
+// @Router       /api/trigger/custom/{idx} [get]
+// @Security     ApiKeyAuth
+func (a *Actions) customTimer(input *common.ActionInput, content string) (int, string) {
+	timerList := a.CronTimer.List()
+
+	customTimerID, err := strconv.Atoi(content)
+	if err != nil || customTimerID < 0 || customTimerID >= len(timerList) {
+		return http.StatusBadRequest, "invalid timer ID"
+	}
+
+	defer timerList[customTimerID].Run(input)
+
+	return http.StatusOK, "Custom Website Timer Triggered: " + timerList[customTimerID].Name
 }
 
 // @Description  Toggle client error log sharing.
@@ -93,7 +196,7 @@ func (a *Actions) runTrigger(input *common.ActionInput, trigger, content string)
 // @Security     ApiKeyAuth
 func (a *Actions) clientLogs(content string) (int, string) {
 	if content == "true" || content == "on" || content == "enable" {
-		share.Setup(a.Timers.Server)
+		share.Setup(a.Server)
 		return http.StatusOK, "Client log notifications enabled."
 	}
 
@@ -107,7 +210,7 @@ func (a *Actions) clientLogs(content string) (int, string) {
 // @Tags         Triggers
 // @Produce      json
 // @Param        hash  path   bool  true  "Unique hash for command being executed"
-// @Param        args formData []string true "provide args as multiple 'args' paramers in POST body" collectionFormat(multi) example(args=/tmp&args=/var)
+// @Param        args formData []string true "provide args as multiple 'args' parameters in POST body" collectionFormat(multi) example(args=/tmp&args=/var)
 // @Accept       application/x-www-form-urlencoded
 // @Success      200  {object} apps.Respond.apiResponse{message=string} "success"
 // @Failure      400  {object} apps.Respond.apiResponse{message=string} "bad or missing hash"
@@ -139,7 +242,7 @@ func (a *Actions) command(input *common.ActionInput, content string) (int, strin
 	return http.StatusOK, "Command triggered: " + cmd.Name
 }
 
-// @Description  Sync TRaSH Radarr data.
+// @Description  Sync custom profiles and formats to Radarr.
 // @Summary      Sync TRaSH Radarr data
 // @Tags         Triggers,TRaSH
 // @Produce      json
@@ -151,18 +254,18 @@ func (a *Actions) command(input *common.ActionInput, content string) (int, strin
 func (a *Actions) cfsync(input *common.ActionInput, content string) (int, string) {
 	if content == "" {
 		a.CFSync.SyncRadarrCF(input.Type)
-		return http.StatusOK, "TRaSH Custom Formats Radarr Sync initiated."
+		return http.StatusOK, "Radarr profile and format sync initiated."
 	}
 
 	instance, _ := strconv.Atoi(content)
 	if err := a.CFSync.SyncRadarrInstanceCF(input.Type, instance); err != nil {
-		return http.StatusBadRequest, "TRaSH Custom Formats Radarr Sync failed for instance " + content + ": " + err.Error()
+		return http.StatusBadRequest, "Radarr profile and format sync initiated for instance " + content + ": " + err.Error()
 	}
 
-	return http.StatusOK, "TRaSH Custom Formats Radarr Sync initiated for instance " + content
+	return http.StatusOK, "Radarr profile and format sync initiated for instance " + content
 }
 
-// @Description  Sync TRaSH Sonarr data.
+// @Description  Sync custom profiles and formats to Sonarr.
 // @Summary      Sync TRaSH Sonarr data
 // @Tags         Triggers,TRaSH
 // @Produce      json
@@ -174,15 +277,15 @@ func (a *Actions) cfsync(input *common.ActionInput, content string) (int, string
 func (a *Actions) rpsync(input *common.ActionInput, content string) (int, string) {
 	if content == "" {
 		a.CFSync.SyncSonarrRP(input.Type)
-		return http.StatusOK, "TRaSH Release Profile Sonarr Sync initiated."
+		return http.StatusOK, "Sonarr profile and format sync initiated."
 	}
 
 	instance, _ := strconv.Atoi(content)
 	if err := a.CFSync.SyncSonarrInstanceRP(input.Type, instance); err != nil {
-		return http.StatusBadRequest, "TRaSH Release Profile Sonarr Sync failed for instance " + content + ": " + err.Error()
+		return http.StatusBadRequest, "Sonarr profile and format sync initiated for instance " + content + ": " + err.Error()
 	}
 
-	return http.StatusOK, "TRaSH Release Profile Sonarr Sync initiated for instance " + content
+	return http.StatusOK, "Sonarr profile and format sync initiated for instance " + content
 }
 
 // @Description  Reschedule all service checks to run immediately.
@@ -194,7 +297,7 @@ func (a *Actions) rpsync(input *common.ActionInput, content string) (int, string
 // @Router       /api/trigger/services [get]
 // @Security     ApiKeyAuth
 func (a *Actions) services(input *common.ActionInput) (int, string) {
-	a.Timers.RunChecks(input.Type)
+	a.RunChecks(input.Type)
 	return http.StatusOK, "All service checks rescheduled for immediate execution."
 }
 
@@ -208,7 +311,7 @@ func (a *Actions) services(input *common.ActionInput) (int, string) {
 // @Router       /api/trigger/sessions [get]
 // @Security     ApiKeyAuth
 func (a *Actions) sessions(input *common.ActionInput) (int, string) {
-	if !a.Timers.Apps.Plex.Enabled() {
+	if !a.Apps.Plex.Enabled() {
 		return http.StatusNotImplemented, "Plex Sessions are not enabled."
 	}
 
@@ -322,7 +425,12 @@ func (a *Actions) backup(input *common.ActionInput, content string) (int, string
 //
 //nolint:lll
 func (a *Actions) handleConfigReload() (int, string) {
-	defer a.Timers.ReloadApp("HTTP Triggered Reload")
+	go func() {
+		// Until we have a way to reliably finish the tunnel requests, this is the best I got.
+		time.Sleep(200 * time.Millisecond) //nolint:mnd
+		a.ReloadApp("HTTP Triggered Reload")
+	}()
+
 	return http.StatusOK, "Application reload initiated."
 }
 
@@ -338,8 +446,8 @@ func (a *Actions) handleConfigReload() (int, string) {
 // @Security     ApiKeyAuth
 func (a *Actions) notification(content string) (int, string) {
 	if content != "" {
-		ui.Notify("Notification: %s", content) //nolint:errcheck
-		a.Timers.Printf("NOTIFICATION: %s", content)
+		ui.Toast("Notification: %s", content) //nolint:errcheck
+		a.Printf("NOTIFICATION: %s", content)
 
 		return http.StatusOK, "Local Nntification sent."
 	}
@@ -358,11 +466,48 @@ func (a *Actions) notification(content string) (int, string) {
 // @Router       /api/trigger/emptyplextrash/{libraryKeys} [get]
 // @Security     ApiKeyAuth
 func (a *Actions) emptyplextrash(input *common.ActionInput, content string) (int, string) {
-	if !a.Timers.Apps.Plex.Enabled() {
+	if !a.Apps.Plex.Enabled() {
 		return http.StatusNotImplemented, "Plex is not enabled."
 	}
 
 	a.EmptyTrash.Plex(input.Type, strings.Split(content, ","))
 
 	return http.StatusOK, "Emptying Plex Trash for library " + content
+}
+
+// @Description  Sends Radarr and Sonarr Libraries for MDBList Syncing.
+// @Summary      Send Libraries for MDBList
+// @Tags         Triggers
+// @Produce      json
+// @Success      200  {object} apps.Respond.apiResponse{message=string} "success"
+// @Failure      404  {object} string "bad token or api key"
+// @Router       /api/trigger/mdblist [get]
+// @Security     ApiKeyAuth
+func (a *Actions) mdblist(input *common.ActionInput) (int, string) {
+	a.MDbList.Send(input.Type)
+	return http.StatusOK, "MDBList library update started."
+}
+
+// @Description  Uploads a log file to Notifiarr.com.
+// @Summary      Upload log file to Notifiarr.com
+// @Tags         Triggers
+// @Produce      json
+// @Param        file  path   string  true  "File to upload. Must be one of app, http, debug"
+// @Success      200  {object} apps.Respond.apiResponse{message=string} "success"
+// @Failure      400  {object} apps.Respond.apiResponse{message=string} "bad or missing file"
+// @Failure      424  {object} apps.Respond.apiResponse{message=string} "log uploads disabled"
+// @Failure      404  {object} string "bad token or api key"
+// @Router       /api/trigger/uploadlog/{file} [get]
+// @Security     ApiKeyAuth
+func (a *Actions) uploadlog(input *common.ActionInput, file string) (int, string) {
+	if a.LogConfig.NoUploads {
+		return http.StatusFailedDependency, "Uploads Administratively Disabled"
+	}
+
+	err := a.FileUpload.Log(input.Type, file)
+	if err != nil {
+		return http.StatusBadRequest, fmt.Sprintf("Uploading %s log file: %v", file, err)
+	}
+
+	return http.StatusOK, fmt.Sprintf("Uploading %s log file.", file)
 }

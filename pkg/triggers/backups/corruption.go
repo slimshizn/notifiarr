@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"os"
 	"path"
@@ -16,13 +15,14 @@ import (
 	"github.com/Notifiarr/notifiarr/pkg/triggers/common"
 	"github.com/Notifiarr/notifiarr/pkg/website"
 	"github.com/Notifiarr/notifiarr/pkg/website/clientinfo"
+	"golift.io/cnfg"
 	"golift.io/starr"
 	"golift.io/xtractr"
 )
 
 // Corruption initializes a corruption check for all instances of the provided app.
 func (a *Action) Corruption(input *common.ActionInput, app starr.App) error {
-	switch app {
+	switch app { //nolint:exhaustive // We only check starr apps.
 	default:
 		return fmt.Errorf("%w: %s", common.ErrInvalidApp, app)
 	case "":
@@ -48,7 +48,7 @@ func (a *Action) Corruption(input *common.ActionInput, app starr.App) error {
 	return nil
 }
 
-func (c *cmd) makeCorruptionTriggersLidarr(ci *clientinfo.ClientInfo) {
+func (c *cmd) makeCorruptionTriggersLidarr(info *clientinfo.ClientInfo) {
 	action := &common.Action{
 		Name: TrigLidarrCorrupt,
 		Fn:   c.sendLidarrCorruption,
@@ -56,24 +56,23 @@ func (c *cmd) makeCorruptionTriggersLidarr(ci *clientinfo.ClientInfo) {
 	}
 	defer c.Add(action)
 
-	if ci == nil {
+	if info == nil {
 		return
 	}
 
-	//nolint:gosec
 	for idx, app := range c.Apps.Lidarr {
 		if app.Enabled() {
-			c.lidarr[idx] = ci.Actions.Apps.Lidarr.Corrupt(idx + 1) // mandatory
-			if c.lidarr[idx] != mnd.Disabled && action.T == nil {
-				randomTime := time.Duration(rand.Intn(randomMinutes))*time.Second +
-					time.Duration(rand.Intn(randomMinutes))*time.Minute
-				action.T = time.NewTicker(checkInterval + randomTime)
+			c.lidarr[idx] = info.Actions.Apps.Lidarr.Corrupt(idx + 1) // mandatory
+			if c.lidarr[idx] != mnd.Disabled {
+				randomTime := time.Duration(c.Config.Rand().Intn(randomMinutes))*time.Second +
+					time.Duration(c.Config.Rand().Intn(randomMinutes))*time.Minute
+				action.D = cnfg.Duration{Duration: checkInterval + randomTime}
 			}
 		}
 	}
 }
 
-func (c *cmd) makeCorruptionTriggersProwlarr(ci *clientinfo.ClientInfo) {
+func (c *cmd) makeCorruptionTriggersProwlarr(info *clientinfo.ClientInfo) {
 	action := &common.Action{
 		Name: TrigProwlarrCorrupt,
 		Fn:   c.sendProwlarrCorruption,
@@ -81,24 +80,23 @@ func (c *cmd) makeCorruptionTriggersProwlarr(ci *clientinfo.ClientInfo) {
 	}
 	defer c.Add(action)
 
-	if ci == nil {
+	if info == nil {
 		return
 	}
 
-	//nolint:gosec
 	for idx, app := range c.Apps.Prowlarr {
 		if app.Enabled() {
-			c.prowlarr[idx] = ci.Actions.Apps.Prowlarr.Corrupt(idx + 1) // mandatory
-			if c.prowlarr[idx] != mnd.Disabled && action.T == nil {
-				randomTime := time.Duration(rand.Intn(randomMinutes))*time.Second +
-					time.Duration(rand.Intn(randomMinutes))*time.Minute
-				action.T = time.NewTicker(checkInterval + randomTime)
+			c.prowlarr[idx] = info.Actions.Apps.Prowlarr.Corrupt(idx + 1) // mandatory
+			if c.prowlarr[idx] != mnd.Disabled {
+				randomTime := time.Duration(c.Config.Rand().Intn(randomMinutes))*time.Second +
+					time.Duration(c.Config.Rand().Intn(randomMinutes))*time.Minute
+				action.D = cnfg.Duration{Duration: checkInterval + randomTime}
 			}
 		}
 	}
 }
 
-func (c *cmd) makeCorruptionTriggersRadarr(ci *clientinfo.ClientInfo) {
+func (c *cmd) makeCorruptionTriggersRadarr(info *clientinfo.ClientInfo) {
 	action := &common.Action{
 		Name: TrigRadarrCorrupt,
 		Fn:   c.sendRadarrCorruption,
@@ -106,24 +104,23 @@ func (c *cmd) makeCorruptionTriggersRadarr(ci *clientinfo.ClientInfo) {
 	}
 	defer c.Add(action)
 
-	if ci == nil {
+	if info == nil {
 		return
 	}
 
-	//nolint:gosec
 	for idx, app := range c.Apps.Radarr {
 		if app.Enabled() {
-			c.radarr[idx] = ci.Actions.Apps.Radarr.Corrupt(idx + 1) // mandatory
-			if c.radarr[idx] != mnd.Disabled && action.T == nil {
-				randomTime := time.Duration(rand.Intn(randomMinutes))*time.Second +
-					time.Duration(rand.Intn(randomMinutes))*time.Minute
-				action.T = time.NewTicker(checkInterval + randomTime)
+			c.radarr[idx] = info.Actions.Apps.Radarr.Corrupt(idx + 1) // mandatory
+			if c.radarr[idx] != mnd.Disabled {
+				randomTime := time.Duration(c.Config.Rand().Intn(randomMinutes))*time.Second +
+					time.Duration(c.Config.Rand().Intn(randomMinutes))*time.Minute
+				action.D = cnfg.Duration{Duration: checkInterval + randomTime}
 			}
 		}
 	}
 }
 
-func (c *cmd) makeCorruptionTriggersReadarr(ci *clientinfo.ClientInfo) {
+func (c *cmd) makeCorruptionTriggersReadarr(info *clientinfo.ClientInfo) {
 	action := &common.Action{
 		Name: TrigReadarrCorrupt,
 		Fn:   c.sendReadarrCorruption,
@@ -131,24 +128,23 @@ func (c *cmd) makeCorruptionTriggersReadarr(ci *clientinfo.ClientInfo) {
 	}
 	defer c.Add(action)
 
-	if ci == nil {
+	if info == nil {
 		return
 	}
 
-	//nolint:gosec
 	for idx, app := range c.Apps.Readarr {
 		if app.Enabled() {
-			c.readarr[idx] = ci.Actions.Apps.Readarr.Corrupt(idx + 1) // mandatory
-			if c.readarr[idx] != mnd.Disabled && action.T == nil {
-				randomTime := time.Duration(rand.Intn(randomMinutes))*time.Second +
-					time.Duration(rand.Intn(randomMinutes))*time.Minute
-				action.T = time.NewTicker(checkInterval + randomTime)
+			c.readarr[idx] = info.Actions.Apps.Readarr.Corrupt(idx + 1) // mandatory
+			if c.readarr[idx] != mnd.Disabled {
+				randomTime := time.Duration(c.Config.Rand().Intn(randomMinutes))*time.Second +
+					time.Duration(c.Config.Rand().Intn(randomMinutes))*time.Minute
+				action.D = cnfg.Duration{Duration: checkInterval + randomTime}
 			}
 		}
 	}
 }
 
-func (c *cmd) makeCorruptionTriggersSonarr(ci *clientinfo.ClientInfo) {
+func (c *cmd) makeCorruptionTriggersSonarr(info *clientinfo.ClientInfo) {
 	action := &common.Action{
 		Name: TrigSonarrCorrupt,
 		Fn:   c.sendSonarrCorruption,
@@ -156,18 +152,17 @@ func (c *cmd) makeCorruptionTriggersSonarr(ci *clientinfo.ClientInfo) {
 	}
 	defer c.Add(action)
 
-	if ci == nil {
+	if info == nil {
 		return
 	}
 
-	//nolint:gosec
 	for idx, app := range c.Apps.Sonarr {
 		if app.Enabled() {
-			c.sonarr[idx] = ci.Actions.Apps.Sonarr.Corrupt(idx + 1)
-			if c.sonarr[idx] != mnd.Disabled && action.T == nil {
-				randomTime := time.Duration(rand.Intn(randomMinutes))*time.Second +
-					time.Duration(rand.Intn(randomMinutes))*time.Minute
-				action.T = time.NewTicker(checkInterval + randomTime)
+			c.sonarr[idx] = info.Actions.Apps.Sonarr.Corrupt(idx + 1)
+			if c.sonarr[idx] != mnd.Disabled {
+				randomTime := time.Duration(c.Config.Rand().Intn(randomMinutes))*time.Second +
+					time.Duration(c.Config.Rand().Intn(randomMinutes))*time.Minute
+				action.D = cnfg.Duration{Duration: checkInterval + randomTime}
 			}
 		}
 	}
@@ -305,10 +300,10 @@ func (c *cmd) checkBackupFileCorruption(
 	input *genericInstance,
 	remotePath string,
 ) (*Info, error) {
-	// XXX: Set TMPDIR to configure this.
 	folder, err := os.MkdirTemp("", "notifiarr_tmp_dir")
 	if err != nil {
-		return nil, fmt.Errorf("creating temporary folder: %w", err)
+		const moreInfo = "click here for help with this: https://notifiarr.wiki/en/Client/Configuration#tmp-not-found"
+		return nil, fmt.Errorf("creating temporary folder: %w - %s", err, moreInfo)
 	}
 
 	defer os.RemoveAll(folder) // clean up when we're done.

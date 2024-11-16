@@ -1,8 +1,10 @@
 package sabnzbd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,12 +16,12 @@ import (
 	"github.com/Notifiarr/notifiarr/pkg/mnd"
 )
 
-var ErrUnknownByteType = fmt.Errorf("unknown byte type")
+var ErrUnknownByteType = errors.New("unknown byte type")
 
 type Config struct {
-	URL          string `toml:"url" xml:"url"`
+	URL          string `toml:"url"     xml:"url"`
 	APIKey       string `toml:"api_key" xml:"api_key"`
-	*http.Client `toml:"-" xml:"-" json:"-"`
+	*http.Client `json:"-"       toml:"-"      xml:"-"`
 }
 
 // QueueSlots has the following data structure.
@@ -112,7 +114,18 @@ type HistorySlots struct {
 	ActionLine   string      `json:"action_line"`
 	Size         string      `json:"size"`
 	Loaded       bool        `json:"loaded"`
-	Retry        int         `json:"retry"`
+	Retry        Bool        `json:"retry"`
+}
+
+// Bool exists because once upon a time sab changed the retry value from int to bool.
+// https://github.com/sabnzbd/sabnzbd/issues/2911
+type Bool bool
+
+func (f *Bool) UnmarshalJSON(b []byte) error {
+	txt := string(bytes.Trim(b, `"`))
+	*f = Bool(txt == "true" || (txt != "0" && txt != "false"))
+
+	return nil
 }
 
 //nolint:tagliatelle
@@ -258,13 +271,15 @@ type SabNZBDate struct {
 }
 
 // UnmarshalJSON exists because weird date formats and "unknown" seem sane in json output.
-func (s *SabNZBDate) UnmarshalJSON(b []byte) (err error) {
+func (s *SabNZBDate) UnmarshalJSON(b []byte) error {
 	s.String = strings.Trim(string(b), `"`)
 
 	if s.String == "unknown" {
-		s.Time = time.Now().Add(time.Hour * 24 * 366) //nolint:gomnd
+		s.Time = time.Now().Add(time.Hour * 24 * 366) //nolint:mnd
 		return nil
 	}
+
+	var err error
 
 	s.Time, err = time.Parse("15:04 Mon 02 Jan 2006", s.String+" "+strconv.Itoa(time.Now().Year()))
 	if err != nil {
@@ -275,7 +290,7 @@ func (s *SabNZBDate) UnmarshalJSON(b []byte) (err error) {
 }
 
 // UnmarshalJSON exists because someone decided that bytes should be strings with letters.
-func (s *SabNZBSize) UnmarshalJSON(b []byte) (err error) {
+func (s *SabNZBSize) UnmarshalJSON(b []byte) error {
 	s.String = strings.Trim(string(b), `"`)
 	split := strings.Split(s.String, " ")
 
@@ -284,22 +299,24 @@ func (s *SabNZBSize) UnmarshalJSON(b []byte) (err error) {
 		return fmt.Errorf("could not convert to number: %s: %w", split[0], err)
 	}
 
-	if len(split) < 2 { //nolint:gomnd
+	if len(split) < 2 { //nolint:mnd
 		s.Bytes = int64(bytes)
 		return nil
 	}
 
-	switch split[1] {
-	case "B", "b", "":
+	switch strings.ToLower(split[1]) {
+	case "", "b":
 		s.Bytes = int64(bytes)
-	case "K", "k", "kb", "KB":
+	case "k", "kb":
 		s.Bytes = int64(bytes * mnd.Kilobyte)
-	case "M", "m", "mb", "MB":
+	case "m", "mb":
 		s.Bytes = int64(bytes * mnd.Megabyte)
-	case "G", "g", "gb", "GB":
+	case "g", "gb":
 		s.Bytes = int64(bytes * mnd.Megabyte * mnd.Kilobyte)
-	case "T", "t", "tb", "TB":
+	case "t", "tb":
 		s.Bytes = int64(bytes * mnd.Megabyte * mnd.Megabyte)
+	case "p", "pb":
+		s.Bytes = int64(bytes * mnd.Megabyte * mnd.Megabyte * mnd.Kilobyte)
 	default:
 		return fmt.Errorf("%w: %s", ErrUnknownByteType, split[1])
 	}

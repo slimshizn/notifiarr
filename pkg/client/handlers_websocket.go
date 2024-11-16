@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path/filepath"
 	"time"
 
 	"github.com/Notifiarr/notifiarr/pkg/logs"
@@ -34,13 +33,9 @@ func (c *Client) handleWebSockets(response http.ResponseWriter, request *http.Re
 
 	var fileInfos *logs.LogFileInfos
 
-	backupPath := filepath.Join(filepath.Dir(c.Flags.ConfigFile), "backups", filepath.Base(c.Flags.ConfigFile))
-
 	switch src := mux.Vars(request)["source"]; src {
 	case fileSourceLogs:
 		fileInfos = c.Logger.GetAllLogFilePaths()
-	case fileSourceConfig:
-		fileInfos = logs.GetFilePaths(c.Flags.ConfigFile, backupPath)
 	default:
 		http.Error(response, "invalid source: "+src, http.StatusBadRequest)
 		c.socketLog(http.StatusBadRequest, request)
@@ -91,7 +86,7 @@ func (c *Client) handleWebSockets(response http.ResponseWriter, request *http.Re
 func (c *Client) webSocketWriter(socket *websocket.Conn, fileTail *tail.Tail) {
 	var (
 		lastError  = ""
-		pingTicker = time.NewTicker(29 * time.Second) //nolint:gomnd
+		pingTicker = time.NewTicker(29 * time.Second) //nolint:mnd
 		writeWait  = 10 * time.Second
 	)
 

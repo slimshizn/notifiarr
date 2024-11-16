@@ -9,6 +9,7 @@ import (
 	"github.com/Notifiarr/notifiarr/pkg/triggers/data"
 	"github.com/Notifiarr/notifiarr/pkg/website"
 	"github.com/Notifiarr/notifiarr/pkg/website/clientinfo"
+	"golift.io/cnfg"
 )
 
 const TrigReadarrQueue common.TriggerName = "Storing Readarr instance %d queue."
@@ -48,22 +49,22 @@ func (c *cmd) setupReadarr() bool {
 	var enable bool
 
 	for idx, app := range c.Apps.Readarr {
-		ci := clientinfo.Get()
-		if !app.Enabled() || ci == nil {
+		info := clientinfo.Get()
+		if !app.Enabled() || info == nil {
 			continue
 		}
 
-		var ticker *time.Ticker
+		var dur time.Duration
 
 		instance := idx + 1
 
 		switch {
-		case ci.Actions.Apps.Readarr.Finished(instance):
+		case info.Actions.Apps.Readarr.Finished(instance):
 			enable = true
-			ticker = time.NewTicker(finishedDuration)
-		case ci.Actions.Apps.Readarr.Stuck(instance):
+			dur = finishedDuration
+		case info.Actions.Apps.Readarr.Stuck(instance):
 			enable = true
-			ticker = time.NewTicker(stuckDuration)
+			dur = stuckDuration
 		default:
 			continue
 		}
@@ -73,7 +74,7 @@ func (c *cmd) setupReadarr() bool {
 			Name: TrigReadarrQueue.WithInstance(instance),
 			Fn:   (&readarrApp{app: app, cmd: c, idx: idx}).storeQueue,
 			C:    make(chan *common.ActionInput, 1),
-			T:    ticker,
+			D:    cnfg.Duration{Duration: dur},
 		})
 	}
 

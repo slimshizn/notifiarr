@@ -9,11 +9,10 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/Notifiarr/notifiarr/pkg/bindata"
 	"github.com/Notifiarr/notifiarr/pkg/mnd"
 	"github.com/gen2brain/beeep"
-	"github.com/gonutz/w32"
-	"github.com/kardianos/osext"
+	"github.com/jxeng/shortcut"
+	"golang.org/x/sys/windows"
 )
 
 // SystrayIcon is the icon in the system tray or task bar.
@@ -24,8 +23,8 @@ func HasGUI() bool {
 	return true
 }
 
-func Notify(msg string, v ...interface{}) error {
-	err := beeep.Notify(mnd.Title, fmt.Sprintf(msg, v...), getPNG())
+func Toast(msg string, v ...interface{}) error {
+	err := beeep.Notify(mnd.Title, fmt.Sprintf(msg, v...), GetPNG())
 	if err != nil {
 		return fmt.Errorf("ui element failed: %w", err)
 	}
@@ -33,74 +32,23 @@ func Notify(msg string, v ...interface{}) error {
 	return nil
 }
 
-// getPNG purposely returns an empty string when there is no verified file.
-// This is used to give the toast notification an icon.
-// Do not throw errors if the icon is missing, it'd nbd, just return empty "".
-func getPNG() string {
-	folder, err := osext.ExecutableFolder()
-	if err != nil {
-		return ""
-	}
-
-	data, err := bindata.Asset("files/favicon.png")
-	if err != nil {
-		return ""
-	}
-
-	const (
-		percent99  = 0.99
-		percent101 = 1.01
-	)
-
-	minimumFileSize := int64(float64(len(data)) * percent99)
-	maximumFileSize := int64(float64(len(data)) * percent101)
-	pngPath := filepath.Join(folder, "notifiarr.png")
-
-	f, err := os.Stat(pngPath)
-	if err != nil || f.Size() < minimumFileSize || f.Size() > maximumFileSize {
-		// File does not exist, or not within 1% of correct size. Overwrite it.
-		if err := os.WriteFile(pngPath, data, mnd.Mode0600); err != nil {
-			return ""
-		}
-	}
-
-	// go log.Println("minmaxsize", minimumFileSize, maximumFileSize, f.Size(), len(data))
-	return pngPath
-}
-
-// HideConsoleWindow makes the console window vanish on startup.
-func HideConsoleWindow() {
-	if console := w32.GetConsoleWindow(); console != 0 {
-		_, consoleProcID := w32.GetWindowThreadProcessId(console)
-		if w32.GetCurrentProcessId() == consoleProcID {
-			w32.ShowWindowAsync(console, w32.SW_HIDE)
-		}
-	}
-}
-
-// ShowConsoleWindow does nothing on OSes besides Windows.
-func ShowConsoleWindow() {
-	if console := w32.GetConsoleWindow(); console != 0 {
-		_, consoleProcID := w32.GetWindowThreadProcessId(console)
-		if w32.GetCurrentProcessId() == consoleProcID {
-			w32.ShowWindowAsync(console, w32.SW_SHOW)
-		}
-	}
-}
-
 // StartCmd starts a command.
-func StartCmd(c string, v ...string) error {
-	cmd := exec.Command(c, v...)
+func StartCmd(command string, args ...string) error {
+	cmd := exec.Command(command, args...)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 
-	return cmd.Start() //nolint:wrapcheck
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("running cmd: %w", err)
+	}
+
+	return nil
 }
 
 // OpenCmd opens anything.
 func OpenCmd(cmd ...string) error {
-	return StartCmd("cmd", append([]string{"/c", "start"}, cmd...)...)
+	return StartCmd(opener, append([]string{"/c", "start"}, cmd...)...)
 }
 
 // OpenURL opens URL Links.
@@ -110,10 +58,72 @@ func OpenURL(url string) error {
 
 // OpenLog opens Log Files.
 func OpenLog(logFile string) error {
-	return OpenCmd("PowerShell", "Get-Content", "-Tail", "1000", "-Wait", "-Encoding", "utf8", "-Path", logFile)
+	return OpenCmd("PowerShell", "Get-Content", "-Tail", "1000", "-Wait", "-Encoding", "utf8", "-Path", "'"+logFile+"'")
 }
 
 // OpenFile open Config Files.
 func OpenFile(filePath string) error {
 	return OpenCmd("file://" + filePath)
+}
+
+const linkName = "Notifiarr.lnk"
+
+func HasStartupLink() (string, bool) {
+	path, err := windows.KnownFolderPath(windows.FOLDERID_Startup, 0)
+	if err != nil {
+		return "", false
+	}
+
+	if _, err = os.Stat(filepath.Join(path, linkName)); err != nil {
+		return "", false
+	}
+
+	return filepath.Join(path, linkName), true
+}
+
+func CreateStartupLink() (bool, string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return false, "", fmt.Errorf("finding executable: %w", err)
+	}
+
+	path, err := windows.KnownFolderPath(windows.FOLDERID_Startup, 0)
+	if err != nil {
+		return false, "", fmt.Errorf("getting startup folder: %w", err)
+	}
+
+	path = filepath.Join(path, linkName)
+	loaded := false
+
+	if _, err := os.Stat(path); err == nil {
+		_ = os.Remove(path) // Remove it so we can re-create it.
+		loaded = true
+	}
+
+	err = shortcut.Create(shortcut.Shortcut{
+		ShortcutPath:     path,
+		Target:           exe,
+		IconLocation:     GetPNG(),
+		Description:      "Launches client for Notifiarr.com",
+		WindowStyle:      "1",
+		WorkingDirectory: filepath.Dir(exe),
+	})
+	if err != nil {
+		return loaded, "", fmt.Errorf("creating startup shortcut: %w", err)
+	}
+
+	return loaded, path, nil
+}
+
+func DeleteStartupLink() (string, error) {
+	link, has := HasStartupLink()
+	if !has {
+		return "", nil
+	}
+
+	if err := os.Remove(link); err != nil {
+		return "", fmt.Errorf("removing shortcut: %w", err)
+	}
+
+	return link, nil
 }

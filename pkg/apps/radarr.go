@@ -10,6 +10,7 @@ import (
 
 	"github.com/Notifiarr/notifiarr/pkg/mnd"
 	"github.com/gorilla/mux"
+	"golang.org/x/time/rate"
 	"golift.io/starr"
 	"golift.io/starr/debuglog"
 	"golift.io/starr/radarr"
@@ -53,19 +54,21 @@ func (a *Apps) radarrHandlers() {
 	a.HandleAPIpath(starr.Radarr, "/notification", radarrGetNotifications, "GET")
 	a.HandleAPIpath(starr.Radarr, "/notification", radarrUpdateNotification, "PUT")
 	a.HandleAPIpath(starr.Radarr, "/notification", radarrAddNotification, "POST")
+	a.HandleAPIpath(starr.Radarr, "/queue/{queueID}", radarrDeleteQueue, "DELETE")
+	a.HandleAPIpath(starr.Radarr, "/delete/{movieID:[0-9]+}", radarrDeleteMovie, "POST")
+	a.HandleAPIpath(starr.Radarr, "/delete/{movieFileID:[0-9]+}", radarrDeleteContent, "DELETE")
 }
 
 // RadarrConfig represents the input data for a Radarr server.
 type RadarrConfig struct {
-	extraConfig
+	ExtraConfig
 	*starr.Config
-	*radarr.Radarr `toml:"-" xml:"-" json:"-"`
-	errorf         func(string, ...interface{}) `toml:"-" xml:"-" json:"-"`
+	*radarr.Radarr `json:"-" toml:"-" xml:"-"`
+	errorf         func(string, ...interface{}) `json:"-" toml:"-" xml:"-"`
 }
 
-func getRadarr(r *http.Request) *radarr.Radarr {
-	app, _ := r.Context().Value(starr.Radarr).(*RadarrConfig)
-	return app.Radarr
+func getRadarr(r *http.Request) *RadarrConfig {
+	return r.Context().Value(starr.Radarr).(*RadarrConfig) //nolint:forcetypeassert
 }
 
 // Enabled returns true if the Radarr instance is enabled and usable.
@@ -86,15 +89,20 @@ func (a *Apps) setupRadarr() error {
 				MaxBody: a.MaxBody,
 				Debugf:  a.Debugf,
 				Caller:  metricMakerCallback(string(starr.Radarr)),
+				Redact:  []string{app.APIKey, app.Password, app.HTTPPass},
 			})
 		} else {
 			app.Config.Client = starr.Client(app.Timeout.Duration, app.ValidSSL)
-			app.Config.Client.Transport = NewMetricsRoundTripper(starr.Radarr.String(), nil)
+			app.Config.Client.Transport = NewMetricsRoundTripper(starr.Radarr.String(), app.Config.Client.Transport)
 		}
 
 		app.errorf = a.Errorf
 		app.URL = strings.TrimRight(app.URL, "/")
 		app.Radarr = radarr.New(app.Config)
+
+		if app.Deletes > 0 {
+			app.delLimit = rate.NewLimiter(rate.Every(1*time.Hour/time.Duration(app.Deletes)), app.Deletes)
+		}
 	}
 
 	return nil
@@ -121,15 +129,15 @@ func radarrAddMovie(req *http.Request) (int, interface{}) {
 	// Extract payload and check for TMDB ID.
 	err := json.NewDecoder(req.Body).Decode(&payload)
 	if err != nil {
-		return http.StatusBadRequest, fmt.Errorf("decoding payload: %w", err)
+		return apiError(http.StatusBadRequest, "decoding payload", err)
 	} else if payload.TmdbID == 0 {
-		return http.StatusUnprocessableEntity, fmt.Errorf("0: %w", ErrNoTMDB)
+		return apiError(http.StatusUnprocessableEntity, "0", ErrNoTMDB)
 	}
 
 	// Check for existing movie.
-	m, err := getRadarr(req).GetMovieContext(req.Context(), payload.TmdbID)
+	m, err := getRadarr(req).GetMovieContext(req.Context(), &radarr.GetMovie{TMDBID: payload.TmdbID})
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("checking movie: %w", err)
+		return apiError(http.StatusServiceUnavailable, "checking movie", err)
 	} else if len(m) > 0 {
 		return http.StatusConflict, radarrData(m[0])
 	}
@@ -146,7 +154,7 @@ func radarrAddMovie(req *http.Request) (int, interface{}) {
 	// Add movie using fixed payload.
 	movie, err := getRadarr(req).AddMovieContext(req.Context(), &payload)
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("adding movie: %w", err)
+		return apiError(http.StatusInternalServerError, "adding movie", err)
 	}
 
 	return http.StatusCreated, movie
@@ -176,9 +184,9 @@ func radarrData(movie *radarr.Movie) map[string]interface{} {
 func radarrCheckMovie(req *http.Request) (int, interface{}) {
 	tmdbID, _ := strconv.ParseInt(mux.Vars(req)["tmdbid"], mnd.Base10, mnd.Bits64)
 	// Check for existing movie.
-	m, err := getRadarr(req).GetMovieContext(req.Context(), tmdbID)
+	m, err := getRadarr(req).GetMovieContext(req.Context(), &radarr.GetMovie{TMDBID: tmdbID})
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("checking movie: %w", err)
+		return apiError(http.StatusServiceUnavailable, "checking movie", err)
 	} else if len(m) > 0 {
 		return http.StatusConflict, radarrData(m[0])
 	}
@@ -202,7 +210,7 @@ func radarrGetMovie(req *http.Request) (int, interface{}) {
 
 	movie, err := getRadarr(req).GetMovieByIDContext(req.Context(), movieID)
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("checking movie: %w", err)
+		return apiError(http.StatusServiceUnavailable, "checking movie", err)
 	}
 
 	return http.StatusOK, movie
@@ -227,7 +235,7 @@ func radarrTriggerSearchMovie(req *http.Request) (int, interface{}) {
 		MovieIDs: []int64{movieID},
 	})
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("triggering movie search: %w", err)
+		return apiError(http.StatusServiceUnavailable, "triggering movie search", err)
 	}
 
 	return http.StatusOK, output.Status
@@ -244,9 +252,9 @@ func radarrTriggerSearchMovie(req *http.Request) (int, interface{}) {
 // @Router       /api/radarr/{instance}/get [get]
 // @Security     ApiKeyAuth
 func radarrGetAllMovies(req *http.Request) (int, interface{}) {
-	movies, err := getRadarr(req).GetMovieContext(req.Context(), 0)
+	movies, err := getRadarr(req).GetMovieContext(req.Context(), &radarr.GetMovie{ExcludeLocalCovers: true})
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("checking movie: %w", err)
+		return apiError(http.StatusServiceUnavailable, "checking movie", err)
 	}
 
 	return http.StatusOK, movies
@@ -266,7 +274,7 @@ func radarrQualityProfile(req *http.Request) (int, interface{}) {
 	// Get the profiles from radarr.
 	profiles, err := getRadarr(req).GetQualityProfilesContext(req.Context())
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("getting profiles: %w", err)
+		return apiError(http.StatusInternalServerError, "getting profiles", err)
 	}
 
 	return http.StatusOK, profiles
@@ -286,7 +294,7 @@ func radarrQualityProfiles(req *http.Request) (int, interface{}) {
 	// Get the profiles from radarr.
 	profiles, err := getRadarr(req).GetQualityProfilesContext(req.Context())
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("getting profiles: %w", err)
+		return apiError(http.StatusInternalServerError, "getting profiles", err)
 	}
 
 	// Format profile ID=>Name into a nice map.
@@ -317,13 +325,13 @@ func radarrAddQualityProfile(req *http.Request) (int, interface{}) {
 	// Extract payload and check for TMDB ID.
 	err := json.NewDecoder(req.Body).Decode(&profile)
 	if err != nil {
-		return http.StatusBadRequest, fmt.Errorf("decoding payload: %w", err)
+		return apiError(http.StatusBadRequest, "decoding payload", err)
 	}
 
 	// Get the profiles from radarr.
 	id, err := getRadarr(req).AddQualityProfileContext(req.Context(), &profile)
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("adding profile: %w", err)
+		return apiError(http.StatusInternalServerError, "adding profile", err)
 	}
 
 	return http.StatusOK, id
@@ -350,7 +358,7 @@ func radarrUpdateQualityProfile(req *http.Request) (int, interface{}) {
 	// Extract payload and check for TMDB ID.
 	err := json.NewDecoder(req.Body).Decode(&profile)
 	if err != nil {
-		return http.StatusBadRequest, fmt.Errorf("decoding payload: %w", err)
+		return apiError(http.StatusBadRequest, "decoding payload", err)
 	}
 
 	profile.ID, _ = strconv.ParseInt(mux.Vars(req)["profileID"], mnd.Base10, mnd.Bits64)
@@ -361,7 +369,7 @@ func radarrUpdateQualityProfile(req *http.Request) (int, interface{}) {
 	// Get the profiles from radarr.
 	_, err = getRadarr(req).UpdateQualityProfileContext(req.Context(), &profile)
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("updating profile: %w", err)
+		return apiError(http.StatusInternalServerError, "updating profile", err)
 	}
 
 	return http.StatusOK, "OK"
@@ -388,7 +396,7 @@ func radarrDeleteQualityProfile(req *http.Request) (int, interface{}) {
 	// Delete the profile from radarr.
 	err := getRadarr(req).DeleteQualityProfileContext(req.Context(), profileID)
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("deleting profile: %w", err)
+		return apiError(http.StatusInternalServerError, "deleting profile", err)
 	}
 
 	return http.StatusOK, "OK"
@@ -417,7 +425,7 @@ func radarrDeleteAllQualityProfiles(req *http.Request) (int, interface{}) {
 	// Get all the profiles from radarr.
 	profiles, err := getRadarr(req).GetQualityProfilesContext(req.Context())
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("getting profiles: %w", err)
+		return apiError(http.StatusInternalServerError, "getting profiles", err)
 	}
 
 	var (
@@ -456,7 +464,7 @@ func radarrRootFolders(req *http.Request) (int, interface{}) {
 	// Get folder list from Radarr.
 	folders, err := getRadarr(req).GetRootFoldersContext(req.Context())
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("getting folders: %w", err)
+		return apiError(http.StatusInternalServerError, "getting folders", err)
 	}
 
 	// Format folder list into a nice path=>freesSpace map.
@@ -481,7 +489,7 @@ func radarrRootFolders(req *http.Request) (int, interface{}) {
 func radarrGetNaming(req *http.Request) (int, interface{}) {
 	naming, err := getRadarr(req).GetNamingContext(req.Context())
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("getting naming: %w", err)
+		return apiError(http.StatusInternalServerError, "getting naming", err)
 	}
 
 	return http.StatusOK, naming
@@ -504,12 +512,12 @@ func radarrUpdateNaming(req *http.Request) (int, interface{}) {
 
 	err := json.NewDecoder(req.Body).Decode(&naming)
 	if err != nil {
-		return http.StatusBadRequest, fmt.Errorf("decoding payload: %w", err)
+		return apiError(http.StatusBadRequest, "decoding payload", err)
 	}
 
 	output, err := getRadarr(req).UpdateNamingContext(req.Context(), &naming)
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("updating naming: %w", err)
+		return apiError(http.StatusServiceUnavailable, "updating naming", err)
 	}
 
 	return http.StatusOK, output.ID
@@ -530,9 +538,9 @@ func radarrUpdateNaming(req *http.Request) (int, interface{}) {
 //nolint:lll
 func radarrSearchMovie(req *http.Request) (int, interface{}) {
 	// Get all movies
-	movies, err := getRadarr(req).GetMovieContext(req.Context(), 0)
+	movies, err := getRadarr(req).GetMovieContext(req.Context(), &radarr.GetMovie{ExcludeLocalCovers: true})
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("getting movies: %w", err)
+		return apiError(http.StatusServiceUnavailable, "getting movies", err)
 	}
 
 	type movieData struct {
@@ -609,7 +617,7 @@ func movieSearch(query string, titles []string, alts []*radarr.AlternativeTitle)
 func radarrGetTags(req *http.Request) (int, interface{}) {
 	tags, err := getRadarr(req).GetTagsContext(req.Context())
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("getting tags: %w", err)
+		return apiError(http.StatusServiceUnavailable, "getting tags", err)
 	}
 
 	return http.StatusOK, tags
@@ -632,7 +640,7 @@ func radarrUpdateTag(req *http.Request) (int, interface{}) {
 
 	tag, err := getRadarr(req).UpdateTagContext(req.Context(), &starr.Tag{ID: id, Label: mux.Vars(req)["label"]})
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("updating tag: %w", err)
+		return apiError(http.StatusServiceUnavailable, "updating tag", err)
 	}
 
 	return http.StatusOK, tag.ID
@@ -652,7 +660,7 @@ func radarrUpdateTag(req *http.Request) (int, interface{}) {
 func radarrSetTag(req *http.Request) (int, interface{}) {
 	tag, err := getRadarr(req).AddTagContext(req.Context(), &starr.Tag{Label: mux.Vars(req)["label"]})
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("setting tag: %w", err)
+		return apiError(http.StatusServiceUnavailable, "setting tag", err)
 	}
 
 	return http.StatusOK, tag.ID
@@ -677,15 +685,15 @@ func radarrUpdateMovie(req *http.Request) (int, interface{}) {
 	// Extract payload and check for TMDB ID.
 	err := json.NewDecoder(req.Body).Decode(&movie)
 	if err != nil {
-		return http.StatusBadRequest, fmt.Errorf("decoding payload: %w", err)
+		return apiError(http.StatusBadRequest, "decoding payload", err)
 	}
 
-	moveFiles := mux.Vars(req)["moveFiles"] == fmt.Sprint(true)
+	moveFiles := mux.Vars(req)["moveFiles"] == strconv.FormatBool(true)
 
 	// Check for existing movie.
 	_, err = getRadarr(req).UpdateMovieContext(req.Context(), movie.ID, &movie, moveFiles)
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("updating movie: %w", err)
+		return apiError(http.StatusServiceUnavailable, "updating movie", err)
 	}
 
 	return http.StatusOK, "radarr seems to have worked"
@@ -709,13 +717,13 @@ func radarrAddExclusions(req *http.Request) (int, interface{}) {
 
 	err := json.NewDecoder(req.Body).Decode(&exclusions)
 	if err != nil {
-		return http.StatusBadRequest, fmt.Errorf("decoding payload: %w", err)
+		return apiError(http.StatusBadRequest, "decoding payload", err)
 	}
 
 	// Get the profiles from radarr.
 	err = getRadarr(req).AddExclusionsContext(req.Context(), exclusions)
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("adding exclusions: %w", err)
+		return apiError(http.StatusInternalServerError, "adding exclusions", err)
 	}
 
 	return http.StatusOK, "added " + strconv.Itoa(len(exclusions)) + " exclusions"
@@ -734,7 +742,7 @@ func radarrAddExclusions(req *http.Request) (int, interface{}) {
 func radarrGetExclusions(req *http.Request) (int, interface{}) {
 	exclusions, err := getRadarr(req).GetExclusionsContext(req.Context())
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("getting exclusions: %w", err)
+		return apiError(http.StatusInternalServerError, "getting exclusions", err)
 	}
 
 	return http.StatusOK, exclusions
@@ -763,10 +771,10 @@ func radarrDelExclusions(req *http.Request) (int, interface{}) {
 
 	err := getRadarr(req).DeleteExclusionsContext(req.Context(), exclusions)
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("deleting exclusions: %w", err)
+		return apiError(http.StatusInternalServerError, "deleting exclusions", err)
 	}
 
-	return http.StatusOK, "deleted: " + strings.Join(strings.Split(ids, ","), ", ")
+	return http.StatusOK, mnd.Deleted + strings.Join(strings.Split(ids, ","), ", ")
 }
 
 // @Description  Creates a new Custom Format in Radarr.
@@ -787,12 +795,12 @@ func radarrAddCustomFormat(req *http.Request) (int, interface{}) {
 
 	err := json.NewDecoder(req.Body).Decode(&cusform)
 	if err != nil {
-		return http.StatusBadRequest, fmt.Errorf("decoding payload: %w", err)
+		return apiError(http.StatusBadRequest, "decoding payload", err)
 	}
 
 	resp, err := getRadarr(req).AddCustomFormatContext(req.Context(), &cusform)
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("adding custom format: %w", err)
+		return apiError(http.StatusInternalServerError, "adding custom format", err)
 	}
 
 	return http.StatusOK, resp
@@ -811,7 +819,7 @@ func radarrAddCustomFormat(req *http.Request) (int, interface{}) {
 func radarrGetCustomFormats(req *http.Request) (int, interface{}) {
 	cusform, err := getRadarr(req).GetCustomFormatsContext(req.Context())
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("getting custom formats: %w", err)
+		return apiError(http.StatusInternalServerError, "getting custom formats", err)
 	}
 
 	return http.StatusOK, cusform
@@ -833,12 +841,12 @@ func radarrGetCustomFormats(req *http.Request) (int, interface{}) {
 func radarrUpdateCustomFormat(req *http.Request) (int, interface{}) {
 	var cusform radarr.CustomFormatInput
 	if err := json.NewDecoder(req.Body).Decode(&cusform); err != nil {
-		return http.StatusBadRequest, fmt.Errorf("decoding payload: %w", err)
+		return apiError(http.StatusBadRequest, "decoding payload", err)
 	}
 
 	output, err := getRadarr(req).UpdateCustomFormatContext(req.Context(), &cusform)
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("updating custom format: %w", err)
+		return apiError(http.StatusInternalServerError, "updating custom format", err)
 	}
 
 	return http.StatusOK, output
@@ -860,7 +868,7 @@ func radarrDeleteCustomFormat(req *http.Request) (int, interface{}) {
 
 	err := getRadarr(req).DeleteCustomFormatContext(req.Context(), cfID)
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("deleting custom format: %w", err)
+		return apiError(http.StatusInternalServerError, "deleting custom format", err)
 	}
 
 	return http.StatusOK, "OK"
@@ -879,7 +887,7 @@ func radarrDeleteCustomFormat(req *http.Request) (int, interface{}) {
 func radarrDeleteAllCustomFormats(req *http.Request) (int, interface{}) {
 	formats, err := getRadarr(req).GetCustomFormatsContext(req.Context())
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("getting custom formats: %w", err)
+		return apiError(http.StatusInternalServerError, "getting custom formats", err)
 	}
 
 	var (
@@ -909,7 +917,7 @@ func radarrDeleteAllCustomFormats(req *http.Request) (int, interface{}) {
 // @Tags         Radarr
 // @Produce      json
 // @Param        instance  path   int64  true  "instance ID"
-// @Success      200  {object} apps.Respond.apiResponse{message=[]radarr.ImportList}  "import list list"
+// @Success      200  {object} apps.Respond.apiResponse{message=[]radarr.ImportListOutput}  "list of import lists"
 // @Failure      500  {object} apps.Respond.apiResponse{message=string} "instance error"
 // @Failure      404  {object} string "bad token or api key"
 // @Router       /api/radarr/{instance}/importlist [get]
@@ -917,7 +925,7 @@ func radarrDeleteAllCustomFormats(req *http.Request) (int, interface{}) {
 func radarrGetImportLists(req *http.Request) (int, interface{}) {
 	ilist, err := getRadarr(req).GetImportListsContext(req.Context())
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("getting import lists: %w", err)
+		return apiError(http.StatusInternalServerError, "getting import lists", err)
 	}
 
 	return http.StatusOK, ilist
@@ -930,24 +938,24 @@ func radarrGetImportLists(req *http.Request) (int, interface{}) {
 // @Accept       json
 // @Param        instance  path   int64  true  "instance ID"
 // @Param        listID  path   int64  true  "Import List ID"
-// @Param        PUT body radarr.ImportList  true  "Updated Import Listcontent"
-// @Success      200  {object} apps.Respond.apiResponse{message=radarr.ImportList}  "import list returns"
+// @Param        PUT body radarr.ImportListInput  true  "Updated Import List Content"
+// @Success      200  {object} apps.Respond.apiResponse{message=radarr.ImportListOutput}  "import list returns"
 // @Failure      400  {object} apps.Respond.apiResponse{message=string} "invalid json provided"
 // @Failure      500  {object} apps.Respond.apiResponse{message=string} "instance error"
 // @Failure      404  {object} string "bad token or api key"
 // @Router       /api/radarr/{instance}/importlist/{listID} [put]
 // @Security     ApiKeyAuth
 func radarrUpdateImportList(req *http.Request) (int, interface{}) {
-	var ilist radarr.ImportList
+	var ilist radarr.ImportListInput
 	if err := json.NewDecoder(req.Body).Decode(&ilist); err != nil {
-		return http.StatusBadRequest, fmt.Errorf("decoding payload: %w", err)
+		return apiError(http.StatusBadRequest, "decoding payload", err)
 	}
 
 	ilist.ID, _ = strconv.ParseInt(mux.Vars(req)["ilid"], mnd.Base10, mnd.Bits64)
 
-	output, err := getRadarr(req).UpdateImportListContext(req.Context(), &ilist)
+	output, err := getRadarr(req).UpdateImportListContext(req.Context(), &ilist, false)
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("updating import list: %w", err)
+		return apiError(http.StatusInternalServerError, "updating import list", err)
 	}
 
 	return http.StatusOK, output
@@ -959,22 +967,22 @@ func radarrUpdateImportList(req *http.Request) (int, interface{}) {
 // @Produce      json
 // @Accept       json
 // @Param        instance  path   int64  true  "instance ID"
-// @Param        POST body radarr.ImportList  true  "New Import List"
-// @Success      200  {object} apps.Respond.apiResponse{message=radarr.ImportList}  "import list returns"
+// @Param        POST body radarr.ImportListInput  true  "New Import List"
+// @Success      200  {object} apps.Respond.apiResponse{message=radarr.ImportListOutput}  "import list returns"
 // @Failure      400  {object} apps.Respond.apiResponse{message=string} "invalid json provided"
 // @Failure      500  {object} apps.Respond.apiResponse{message=string} "instance error"
 // @Failure      404  {object} string "bad token or api key"
 // @Router       /api/radarr/{instance}/importlist [post]
 // @Security     ApiKeyAuth
 func radarrAddImportList(req *http.Request) (int, interface{}) {
-	var ilist radarr.ImportList
+	var ilist radarr.ImportListInput
 	if err := json.NewDecoder(req.Body).Decode(&ilist); err != nil {
-		return http.StatusBadRequest, fmt.Errorf("decoding payload: %w", err)
+		return apiError(http.StatusBadRequest, "decoding payload", err)
 	}
 
-	output, err := getRadarr(req).CreateImportListContext(req.Context(), &ilist)
+	output, err := getRadarr(req).AddImportListContext(req.Context(), &ilist)
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("creating import list: %w", err)
+		return apiError(http.StatusInternalServerError, "creating import list", err)
 	}
 
 	return http.StatusOK, output
@@ -993,7 +1001,7 @@ func radarrAddImportList(req *http.Request) (int, interface{}) {
 func radarrGetQualityDefinitions(req *http.Request) (int, interface{}) {
 	output, err := getRadarr(req).GetQualityDefinitionsContext(req.Context())
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("getting quality definitions: %w", err)
+		return apiError(http.StatusInternalServerError, "getting quality definitions", err)
 	}
 
 	return http.StatusOK, output
@@ -1005,7 +1013,7 @@ func radarrGetQualityDefinitions(req *http.Request) (int, interface{}) {
 // @Produce      json
 // @Accept       json
 // @Param        instance  path   int64  true  "instance ID"
-// @Param        PUT body []radarr.QualityDefinition  true  "Updated Import Listcontent"
+// @Param        PUT body []radarr.QualityDefinition  true  "Updated quality definitions"
 // @Success      200  {object} apps.Respond.apiResponse{message=[]radarr.QualityDefinition}  "quality definitions return"
 // @Failure      400  {object} apps.Respond.apiResponse{message=string} "invalid json provided"
 // @Failure      500  {object} apps.Respond.apiResponse{message=string} "instance error"
@@ -1017,12 +1025,12 @@ func radarrGetQualityDefinitions(req *http.Request) (int, interface{}) {
 func radarrUpdateQualityDefinition(req *http.Request) (int, interface{}) {
 	var input []*radarr.QualityDefinition
 	if err := json.NewDecoder(req.Body).Decode(&input); err != nil {
-		return http.StatusBadRequest, fmt.Errorf("decoding payload: %w", err)
+		return apiError(http.StatusBadRequest, "decoding payload", err)
 	}
 
 	output, err := getRadarr(req).UpdateQualityDefinitionsContext(req.Context(), input)
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("updating quality definition: %w", err)
+		return apiError(http.StatusInternalServerError, "updating quality definition", err)
 	}
 
 	return http.StatusOK, output
@@ -1041,7 +1049,7 @@ func radarrUpdateQualityDefinition(req *http.Request) (int, interface{}) {
 func radarrGetNotifications(req *http.Request) (int, interface{}) {
 	notifs, err := getRadarr(req).GetNotificationsContext(req.Context())
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("getting notifications: %w", err)
+		return apiError(http.StatusServiceUnavailable, "getting notifications", err)
 	}
 
 	output := []*radarr.NotificationOutput{}
@@ -1055,7 +1063,7 @@ func radarrGetNotifications(req *http.Request) (int, interface{}) {
 	return http.StatusOK, output
 }
 
-// @Description  Updates a Notifcation in Radarr.
+// @Description  Updates a Notification in Radarr.
 // @Summary      Update Radarr Notification
 // @Tags         Radarr
 // @Produce      json
@@ -1073,12 +1081,12 @@ func radarrUpdateNotification(req *http.Request) (int, interface{}) {
 
 	err := json.NewDecoder(req.Body).Decode(&notif)
 	if err != nil {
-		return http.StatusBadRequest, fmt.Errorf("decoding payload: %w", err)
+		return apiError(http.StatusBadRequest, "decoding payload", err)
 	}
 
 	_, err = getRadarr(req).UpdateNotificationContext(req.Context(), &notif)
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("updating notification: %w", err)
+		return apiError(http.StatusServiceUnavailable, "updating notification", err)
 	}
 
 	return http.StatusOK, mnd.Success
@@ -1102,13 +1110,106 @@ func radarrAddNotification(req *http.Request) (int, interface{}) {
 
 	err := json.NewDecoder(req.Body).Decode(&notif)
 	if err != nil {
-		return http.StatusBadRequest, fmt.Errorf("decoding payload: %w", err)
+		return apiError(http.StatusBadRequest, "decoding payload", err)
 	}
 
 	id, err := getRadarr(req).AddNotificationContext(req.Context(), &notif)
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("adding notification: %w", err)
+		return apiError(http.StatusServiceUnavailable, "adding notification", err)
 	}
 
 	return http.StatusOK, id
+}
+
+// @Description  Delete items from the activity queue.
+// @Summary      Delete Queue Items
+// @Tags         Radarr
+// @Produce      json
+// @Param        instance         path    int64  true  "instance ID"
+// @Param        queueID          path    int64  true  "queue ID to delete"
+// @Param        removeFromClient query   bool  false  "remove download from download client?"
+// @Param        blocklist        query   bool  false  "add item to blocklist?"
+// @Param        skipRedownload   query   bool  false  "skip downloading this again?"
+// @Param        changeCategory   query   bool  false  "tell download client to change categories?"
+// @Success      200  {object} apps.Respond.apiResponse{message=string}  "ok"
+// @Failure      500  {object} apps.Respond.apiResponse{message=string} "instance error"
+// @Failure      404  {object} string "bad token or api key"
+// @Failure      423  {object} string "rate limit reached"
+// @Router       /api/radarr/{instance}/queue/{queueID} [delete]
+// @Security     ApiKeyAuth
+func radarrDeleteQueue(req *http.Request) (int, interface{}) {
+	idString := mux.Vars(req)["queueID"]
+	queueID, _ := strconv.ParseInt(idString, mnd.Base10, mnd.Bits64)
+	removeFromClient := req.URL.Query().Get("removeFromClient") == mnd.True
+	opts := &starr.QueueDeleteOpts{
+		RemoveFromClient: &removeFromClient,
+		BlockList:        req.URL.Query().Get("blocklist") == mnd.True,
+		SkipRedownload:   req.URL.Query().Get("skipRedownload") == mnd.True,
+		ChangeCategory:   req.URL.Query().Get("changeCategory") == mnd.True,
+	}
+
+	err := getRadarr(req).DeleteQueueContext(req.Context(), queueID, opts)
+	if err != nil {
+		return apiError(http.StatusInternalServerError, "deleting queue", err)
+	}
+
+	return http.StatusOK, mnd.Deleted + idString
+}
+
+// @Description  Delete Movies from Radarr.
+// @Summary      Remove Radarr Movies
+// @Tags         Radarr
+// @Produce      json
+// @Param        instance  path   int64  true  "instance ID"
+// @Param        movieID  path   int64  true  "movie ID to delete"
+// @Success      200  {object} apps.Respond.apiResponse{message=string}  "ok"
+// @Failure      500  {object} apps.Respond.apiResponse{message=string} "instance error"
+// @Failure      404  {object} string "bad token or api key"
+// @Failure      423  {object} string "rate limit reached"
+// @Router       /api/radarr/{instance}/delete/{movieID} [post]
+// @Security     ApiKeyAuth
+func radarrDeleteMovie(req *http.Request) (int, interface{}) {
+	idString := mux.Vars(req)["movieID"]
+	movieID, _ := strconv.ParseInt(idString, mnd.Base10, mnd.Bits64)
+	deleteFiles := req.PostFormValue("deleteFiles")
+	addExclusion := req.PostFormValue("addImportExclusion")
+
+	if !getRadarr(req).DelOK() {
+		return http.StatusLocked, ErrRateLimit
+	}
+
+	err := getRadarr(req).DeleteMovieContext(req.Context(), movieID, deleteFiles == "true", addExclusion == "true")
+	if err != nil {
+		return apiError(http.StatusInternalServerError, "deleting movie", err)
+	}
+
+	return http.StatusOK, mnd.Deleted + idString
+}
+
+// @Description  Delete Movie files from Radarr without deleting the movie.
+// @Summary      Remove Radarr movie files
+// @Tags         Radarr
+// @Produce      json
+// @Param        instance  path   int64  true  "instance ID"
+// @Param        movieFileID  path   int64  true  "movie file ID to delete"
+// @Success      200  {object} apps.Respond.apiResponse{message=string}  "ok"
+// @Failure      500  {object} apps.Respond.apiResponse{message=string} "instance error"
+// @Failure      404  {object} string "bad token or api key"
+// @Failure      423  {object} string "rate limit reached"
+// @Router       /api/radarr/{instance}/delete/{movieFileID} [delete]
+// @Security     ApiKeyAuth
+func radarrDeleteContent(req *http.Request) (int, interface{}) {
+	idString := mux.Vars(req)["movieFileID"]
+	movieFileID, _ := strconv.ParseInt(idString, mnd.Base10, mnd.Bits64)
+
+	if !getRadarr(req).DelOK() {
+		return http.StatusLocked, ErrRateLimit
+	}
+
+	err := getRadarr(req).DeleteMovieFilesContext(req.Context(), movieFileID)
+	if err != nil {
+		return apiError(http.StatusInternalServerError, "deleting movie file", err)
+	}
+
+	return http.StatusOK, mnd.Deleted + idString
 }

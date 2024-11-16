@@ -1,4 +1,4 @@
-<img src="https://docs.notifiarr.com/img/repo-logo.png">
+<img src="https://gh.notifiarr.com/img/repo-logo.png">
 
 This is the unified client for [Notifiarr.com](https://notifiarr.com).
 The client enables content requests from Media Bot in your Discord Server and also provides reports for Plex usage and system health among many other features.
@@ -10,7 +10,7 @@ The client enables content requests from Media Bot in your Discord Server and al
 Linux repository hosting provided by
 [![packagecloud](https://docs.golift.io/integrations/packagecloud-full.png "PackageCloud.io")](http://packagecloud.io)
 
-This works on any system with apt or yum. If your system does not use APT or YUM, then download a binary from the [Releases](https://github.com/Notifiarr/notifiarr/releases) page.
+This works on any system with apt or yum. If your system does not use APT or YUM, then download a binary from the [Releases](https://github.com/Notifiarr/notifiarr/releases/latest) page.
 
 On Linux, Notifiarr runs as `user:group` of `notifiarr:notifiarr`.
 
@@ -29,19 +29,30 @@ sudo systemctl restart notifiarr
 
 #### Arch Linux
 
-This one is special; hope you know what you're doing.
-Build a package with `makepkg` using the `aur` source.
-Here: <https://github.com/golift/aur>
+- Download a `zst` package from the
+  [Releases](https://github.com/Notifiarr/notifiarr/releases/latest) page.
+- Install it:  `pacman -U *.zst`
+- Edit config: `nano /etc/notifiarr/notifiarr.conf`
+- Restart it:  `systemctl start notifiarr`
+
+Example of the above in shell form:
+
+```shell
+curl https://raw.githubusercontent.com/Notifiarr/notifiarr/main/userscripts/install.sh | sudo bash
+
+nano /etc/notifiarr/notifiarr.conf
+systemctl start notifiarr
+```
 
 ### FreeBSD
 
-- Download a package from the [Releases](https://github.com/Notifiarr/notifiarr/releases) page.
+- Download a `txz` package from the [Releases](https://github.com/Notifiarr/notifiarr/releases/latest) page.
 - Install it, edit config, start it.
 
 Example of the above in shell form:
 
 ```shell
-wget -qO- https://raw.githubusercontent.com/Notifiarr/notifiarr/main/scripts/install.sh | sudo bash
+wget -qO- https://raw.githubusercontent.com/Notifiarr/notifiarr/main/userscripts/install.sh | sudo bash
 
 vi /usr/local/etc/notifiarr/notifiarr.conf
 service notifiarr start
@@ -53,15 +64,9 @@ On FreeBSD, Notifiarr runs as `user:group` of `notifiarr:notifiarr`.
 
 #### Homebrew
 
-- Edit config file at `/usr/local/etc/notifiarr/notifiarr.conf`
-- Start it.
-- Like this:
-
-```shell
-brew install golift/mugs/notifiarr
-vi /usr/local/etc/notifiarr/notifiarr.conf
-brew services start notifiarr
-```
+Homebrew is no longer a supported installation method.
+[Download the DMG](https://github.com/Notifiarr/notifiarr/releases/latest)
+and put `Notifiarr.app` in `/Applications` instead.
 
 #### macOS App
 
@@ -101,11 +106,12 @@ A sample docker compose file is [found in Examples](https://github.com/Notifiarr
 - Map the `/var/run/utmp` volume if you want to count users.
 - Mount any volumes you want to report storage space for. Where does not matter, "where" is the "name".
 - You MUST set a static hostname. Each client is identified by hostname.
+- You should mount `/config` - notifiarr will create the config file on first run.
 
 ```shell
 docker pull golift/notifiarr
 docker run --hostname=$(hostname) -d \
--v /your/config/notifiarr.conf:/config/notifiarr.conf \
+-v /your/appdata/notifiarr/:/config \
 -v /var/run/utmp:/var/run/utmp \
 golift/notifiarr
 docker logs <container id from docker run>
@@ -131,17 +137,17 @@ docker logs <container id from docker run>
 
 ### WebUI
 
-To enable the webui, add this parameter to your config file, toward the top next to quiet, and restart the client:
+To enable the webui, add this parameter to your config file, toward the top next to `quiet`, and restart the client:
 
 ```yaml
 ui_password = "username:9CharacterPassword"
 ```
 
-Use a password that is at least 9 characters long. 
+Use a password that is at least 9 characters long.
 Once you log into the web interface, you can change the password and it will be saved encrypted (so no one can snoop it).
 
-You may also set `ui_password` to the value of `"webauth"` to enable proxy authentication support. 
-You must also add your auth proxy IP or CIDR to the `upstreams` setting for this to work. 
+You may also set `ui_password` to the value of `"webauth"` to enable proxy authentication support.
+You must also add your auth proxy IP or CIDR to the `upstreams` setting for this to work.
 The proxy must pass `x-webauth-user: username` as a header, and you will be automatically logged in.
 
 ### Config Settings
@@ -290,7 +296,7 @@ You may report your GPU and memory Utilization for Nvidia cards. Automatic if `n
 | ------------------ | ------------------------- | ----------------------------------------------------------------------- |
 | prowlarr.name      | `DN_PROWLARR_0_NAME`      | No Default. Setting a name enables service checks                       |
 | prowlarr.url       | `DN_PROWLARR_0_URL`       | No Default. Something like: `http://prowlarr:9696`                      |
-| prowlarr.api_key   | `DN_PROWLARR_0_API_KEY`   | No Default. Provide URL and API key if you use Readarr                  |
+| prowlarr.api_key   | `DN_PROWLARR_0_API_KEY`   | No Default. Provide URL and API key if you use Prowlarr                  |
 | prowlarr.username  | `DN_PROWLARR_0_USERNAME`  | Provide username if using backup corruption check and auth is enabled   |
 | prowlarr.password  | `DN_PROWLARR_0_PASSWORD`  | Provide password if using backup corruption check and auth is enabled   |
 | prowlarr.http_user | `DN_PROWLARR_0_HTTP_USER` | Provide username if Prowlarr uses basic auth (uncommon) and BCC enabled |
@@ -338,7 +344,7 @@ You can add supported downloaders so they show up on the dashboard integration.
 You may easily add service checks to these downloaders by adding a name.
 Any number of downloaders of any type may be configured.
 
-All application instances also have `interval` and `timeout` inputs represented as a Go Duration. 
+All application instances also have `interval` and `timeout` inputs represented as a Go Duration.
 Setting `interval` to `-1s` disables service checks for that application.
 Setting `timeout` to `-1s` disables that instance entirely. Useful if an instacne is down temporarily.
 Example Go Durations: `1m`, `1m30s`, `3m15s`, 1h5m`. Valid units are `s`, `m`, and `h`. Combining units is additive.
@@ -393,7 +399,7 @@ Example Go Durations: `1m`, `1m30s`, `3m15s`, 1h5m`. Valid units are `s`, `m`, a
 
 ### Plex
 
-This application can also send Plex sessions to Notifiarr so you can receive notifications when users interact with your server. 
+This application can also send Plex sessions to Notifiarr so you can receive notifications when users interact with your server.
 This has three different features:
 
 - Notify all sessions on a longer interval (30+ minutes).
@@ -416,7 +422,7 @@ You may also need to add a webhook to Plex so it sends notices to this applicati
 
 ### Tautulli
 
-Only 1 Tautulli instance may be configured per client. 
+Only 1 Tautulli instance may be configured per client.
 Providing Tautulli allows Notifiarr to use the "Friendly Name" for your Plex users and it allows you to easily enable a service check.
 
 | Config Name      | Variable Name         | Note                                                                    |
@@ -502,7 +508,7 @@ Make sure the Nginx `location` path matches the `urlbase` Notifiarr setting.
 That's all there is to it.
 
 Using an auth proxy? Be sure to set `ui_password` to the string `"webauth"`.
-The Nginx config looks more like this:
+Also see the [WebUI](#WebUI) section above. The Nginx config looks more like this:
 
 ```nginx
 location /notifiarr/api {
@@ -533,11 +539,10 @@ Here are two more example Nginx configs:
 
 You can set a log file in the config. You should do that. Otherwise, find your logs here:
 
-- Linux: `/var/log/notifiarr/app.log`
-- FreeBSD: `/var/log/syslog` (w/ default syslog)
-- Homebrew: `/usr/local/var/log/notifiarr.log` or `/opt/homebrew/var/log/notifiarr.log`
-- macOS: `~/.notifiarr/notifiarr.log`
-- Windows: `<home folder>/.notifiarr/notifiarr.log`
+- Linux: `/var/log/notifiarr/app.log` (daemon), or `~/.notifiarr/Notifiarr.log` (desktop)
+- FreeBSD: `/usr/local/var/log/notifiarr/app.log` (service), or `~/.notifiarr/Notifiarr.log` (desktop)
+- macOS: `~/.notifiarr/Notifiarr.log`
+- Windows: `C:\Users\YOURNAME\.notifiarr\Notifiarr.log`
 
 Still having problems?
 [Let us know!](https://github.com/Notifiarr/notifiarr/issues/new)
@@ -552,7 +557,6 @@ documentation support. This project succeeds because of them. Thank you!
 <a title="PackageCloud" alt="PackageCloud" href="https://packagecloud.io"><img src="https://docs.golift.io/integrations/packagecloud.png"/></a>
 <a title="GitHub" alt="GitHub" href="https://GitHub.com"><img src="https://docs.golift.io/integrations/octocat.png"/></a>
 <a title="Docker Cloud" alt="Docker" href="https://cloud.docker.com"><img src="https://docs.golift.io/integrations/docker.png"/></a>
-<a title="Travis-CI" alt="Travis-CI" href="https://Travis-CI.com"><img src="https://docs.golift.io/integrations/travis-ci.png"/></a>
 <a title="Homebrew" alt="Homebrew" href="https://brew.sh"><img src="https://docs.golift.io/integrations/homebrew.png"/></a>
 <a title="Go Lift" alt="Go Lift" href="https://golift.io"><img src="https://docs.golift.io/integrations/golift.png"/></a>
 <a title="Better Uptime" alt="Go Lift" href="https://betteruptime.com"><img src="https://docs.golift.io/integrations/betteruptime.png"/></a>
@@ -560,8 +564,8 @@ documentation support. This project succeeds because of them. Thank you!
 
 ## Contributing
 
-Yes, please.
+Join us on Discord and we can discuss.
 
 ## License
 
-[MIT](https://github.com/Notifiarr/notifiarr/blob/main/LICENSE) - Copyright (c) 2020-2022 Go Lift
+[MIT](https://github.com/Notifiarr/notifiarr/blob/main/LICENSE) - Copyright (c) 2020-2024 Go Lift

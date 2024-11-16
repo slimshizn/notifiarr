@@ -15,23 +15,47 @@ import (
 // ClientInfo is the client's startup data received from the website.
 type ClientInfo struct {
 	User struct {
-		WelcomeMSG string  `json:"welcome"`
-		Subscriber bool    `json:"subscriber"`
-		Patron     bool    `json:"patron"`
-		DevAllowed bool    `json:"devAllowed"`
+		// user id from notifiarr db.
+		ID any `json:"id"`
+		// This is printed on startup and on the UI landing page.
+		WelcomeMSG string `json:"welcome"`
+		// Is the user a subscriber?
+		Subscriber bool `json:"subscriber"`
+		// Is the user a patron?
+		Patron bool `json:"patron"`
+		// Is the user allowed to use non-production website apis?
+		DevAllowed bool `json:"devAllowed"`
+		// This is the date format the user selected on the website.
 		DateFormat PHPDate `json:"dateFormat"`
-		StopLogs   bool    `json:"stopLogs"`
+		// The website can use this to tell the client not to send any logs.
+		StopLogs bool `json:"stopLogs"`
+		// This is the URL the website uses to connect to the client.
+		// It's just for info/debug here, and not used by the client.
+		TunnelURL string `json:"tunnelUrl"`
+		// This is the list of tunnels the website tells the client to connect to.
+		Tunnels []string `json:"tunnels"`
+		// List of tunnels that notifiarr.com recognizes.
+		// Any of these may be used.
+		Mulery []*MuleryServer `json:"mulery"`
 	} `json:"user"`
 	Actions struct {
-		Poll      bool             `json:"poll"`
-		Plex      PlexConfig       `json:"plex"`      // Site Config for Plex.
-		Apps      AllAppConfigs    `json:"apps"`      // Site Config for Starr.
-		Dashboard DashConfig       `json:"dashboard"` // Site Config for Dashboard.
-		Sync      SyncConfig       `json:"sync"`      // Site Config for TRaSH Sync.
-		Gaps      GapsConfig       `json:"gaps"`      // Site Config for Radarr Gaps.
-		Custom    []*CronConfig    `json:"custom"`    // Site config for Custom Crons.
-		Snapshot  *snapshot.Config `json:"snapshot"`  // Site Config for System Snapshot.
+		Plex      PlexConfig      `json:"plex"`      // Site Config for Plex.
+		Apps      AllAppConfigs   `json:"apps"`      // Site Config for Starr.
+		Dashboard DashConfig      `json:"dashboard"` // Site Config for Dashboard.
+		Sync      SyncConfig      `json:"sync"`      // Site Config for TRaSH Sync.
+		Mdblist   MdbListConfig   `json:"mdblist"`   // Site Config for MDB List.
+		Gaps      GapsConfig      `json:"gaps"`      // Site Config for Radarr Gaps.
+		Custom    []*CronConfig   `json:"custom"`    // Site config for Custom Crons.
+		Snapshot  snapshot.Config `json:"snapshot"`  // Site Config for System Snapshot.
 	} `json:"actions"`
+	IntegrityCheck bool `json:"integrityCheck"`
+}
+
+// MuleryServer is data from the website. It's a tunnel's https and wss urls.
+type MuleryServer struct {
+	Tunnel   string `json:"tunnel"`   // ex: "https://africa.notifiarr.com/"
+	Socket   string `json:"socket"`   // ex: "wss://africa.notifiarr.com/register"
+	Location string `json:"location"` // ex: "Nairobi, Kenya, Africa"
 }
 
 // CronConfig defines a custom GET timer from the website.
@@ -45,18 +69,25 @@ type CronConfig struct {
 
 // SyncConfig is the configuration returned from the notifiarr website for CF/RP TraSH sync.
 type SyncConfig struct {
-	Interval        cnfg.Duration `json:"interval"`        // how often to fire in minutes.
-	Radarr          int64         `json:"radarr"`          // deprecated: items in sync
+	Interval        cnfg.Duration `json:"interval"`        // how often to fire.
+	LidarrInstances IntList       `json:"lidarrInstances"` // which instance IDs we sync
 	RadarrInstances IntList       `json:"radarrInstances"` // which instance IDs we sync
-	Sonarr          int64         `json:"sonarr"`          // deprecated: items in sync
 	SonarrInstances IntList       `json:"sonarrInstances"` // which instance IDs we sync
+	LidarrSync      []string      `json:"lidarrSync"`      // items in sync.
 	SonarrSync      []string      `json:"sonarrSync"`      // items in sync.
 	RadarrSync      []string      `json:"radarrSync"`      // items in sync.
 }
 
+// MdbListConfig contains the instances we send libraries for, and the interval we do it in.
+type MdbListConfig struct {
+	Interval cnfg.Duration `json:"interval"` // how often to fire.
+	Radarr   IntList       `json:"radarr"`   // which instance IDs we sync
+	Sonarr   IntList       `json:"sonarr"`   // which instance IDs we sync
+}
+
 // DashConfig is the configuration returned from the notifiarr website for the dashboard configuration.
 type DashConfig struct {
-	Interval cnfg.Duration `json:"interval"` // how often to fire in minutes.
+	Interval cnfg.Duration `json:"interval"` // how often to fire.
 }
 
 // AppConfig is the data that comes from the website for each Starr app.

@@ -8,8 +8,9 @@ import (
 	"reflect"
 
 	"github.com/Notifiarr/notifiarr/pkg/apps"
-	"github.com/Notifiarr/notifiarr/pkg/mnd"
+	"github.com/Notifiarr/notifiarr/pkg/logs"
 	"github.com/Notifiarr/notifiarr/pkg/snapshot"
+	"github.com/Notifiarr/notifiarr/pkg/triggers/autoupdate"
 	"github.com/Notifiarr/notifiarr/pkg/triggers/backups"
 	"github.com/Notifiarr/notifiarr/pkg/triggers/cfsync"
 	"github.com/Notifiarr/notifiarr/pkg/triggers/commands"
@@ -17,8 +18,10 @@ import (
 	"github.com/Notifiarr/notifiarr/pkg/triggers/crontimer"
 	"github.com/Notifiarr/notifiarr/pkg/triggers/dashboard"
 	"github.com/Notifiarr/notifiarr/pkg/triggers/emptytrash"
+	"github.com/Notifiarr/notifiarr/pkg/triggers/fileupload"
 	"github.com/Notifiarr/notifiarr/pkg/triggers/filewatch"
 	"github.com/Notifiarr/notifiarr/pkg/triggers/gaps"
+	"github.com/Notifiarr/notifiarr/pkg/triggers/mdblist"
 	"github.com/Notifiarr/notifiarr/pkg/triggers/plexcron"
 	"github.com/Notifiarr/notifiarr/pkg/triggers/snapcron"
 	"github.com/Notifiarr/notifiarr/pkg/triggers/starrqueue"
@@ -32,16 +35,20 @@ type Config struct {
 	Website    *website.Server
 	Snapshot   *snapshot.Config
 	WatchFiles []*filewatch.WatchFile
+	LogFiles   []string
 	Commands   []*commands.Command
-	CIC        *clientinfo.Config
+	ClientInfo *clientinfo.Config
+	ConfigFile string
+	AutoUpdate string
+	UnstableCh bool
 	common.Services
-	mnd.Logger
+	*logs.Logger
 }
 
 // Actions defines all our triggers and timers.
 // Any action here will automatically have its interface methods called.
 type Actions struct {
-	Timers *common.Config
+	*common.Config
 	// Order is important here.
 	PlexCron   *plexcron.Action
 	Backups    *backups.Action
@@ -54,6 +61,9 @@ type Actions struct {
 	StarrQueue *starrqueue.Action
 	Commands   *commands.Action
 	EmptyTrash *emptytrash.Action
+	MDbList    *mdblist.Action
+	FileUpload *fileupload.Action
+	AutoUpdate *autoupdate.Action
 }
 
 // New turns a populated Config into a pile of Actions.
@@ -63,7 +73,7 @@ func New(config *Config) *Actions {
 		Snapshot: config.Snapshot,
 		Apps:     config.Apps,
 		Logger:   config.Logger,
-		CIC:      config.CIC,
+		CI:       config.ClientInfo,
 		Services: config.Services,
 	}
 	plex := plexcron.New(common, config.Apps.Plex)
@@ -74,53 +84,49 @@ func New(config *Config) *Actions {
 		CFSync:     cfsync.New(common),
 		CronTimer:  crontimer.New(common),
 		Dashboard:  dashboard.New(common, plex),
-		FileWatch:  filewatch.New(common, config.WatchFiles),
+		FileWatch:  filewatch.New(common, config.WatchFiles, config.LogFiles),
 		Gaps:       gaps.New(common),
 		SnapCron:   snapcron.New(common),
 		StarrQueue: starrqueue.New(common),
 		Commands:   commands.New(common, config.Commands),
 		EmptyTrash: emptytrash.New(common),
-		Timers:     common,
+		MDbList:    mdblist.New(common),
+		FileUpload: fileupload.New(common),
+		Config:     common,
+		AutoUpdate: autoupdate.New(common, config.AutoUpdate, config.ConfigFile, config.UnstableCh),
 	}
 }
 
 // These methods use reflection so they never really need to be updated.
 // They execute all Create(), Run() and Stop() procedures defined in our Actions.
 
-type create interface {
-	Create()
-}
-
-type run interface {
-	Run()
-	Stop()
-}
-
 // Start creates all the triggers and runs the timers.
-func (a *Actions) Start(ctx context.Context, reloadCh chan os.Signal) {
-	a.Timers.SetReloadCh(reloadCh)
-	defer a.Timers.Run(ctx)
+func (a *Actions) Start(ctx context.Context, reloadCh, stopCh chan os.Signal) {
+	a.SetReloadCh(reloadCh)
+	a.SetStopCh(stopCh)
+
+	defer a.Run(ctx)
 
 	actions := reflect.ValueOf(a).Elem()
-	for i := 0; i < actions.NumField(); i++ {
-		if !actions.Field(i).CanInterface() {
+	for idx := range actions.NumField() {
+		if !actions.Field(idx).CanInterface() {
 			continue
 		}
 
 		// A panic here means you screwed up the code somewhere else.
-		if action, ok := actions.Field(i).Interface().(create); ok {
+		if action, ok := actions.Field(idx).Interface().(common.Create); ok {
 			action.Create()
 		}
 		// No 'else if' so you can have both if you need them.
-		if action, ok := actions.Field(i).Interface().(run); ok {
-			action.Run()
+		if action, ok := actions.Field(idx).Interface().(common.Run); ok {
+			go action.Run(ctx)
 		}
 	}
 }
 
 // Stop all internal cron timers and Triggers.
 func (a *Actions) Stop(event website.EventType) {
-	a.Timers.Stop(event)
+	a.Config.Stop(event)
 
 	actions := reflect.ValueOf(a).Elem()
 	// Stop them in reverse order they were started.
@@ -129,7 +135,7 @@ func (a *Actions) Stop(event website.EventType) {
 			continue
 		}
 
-		if action, ok := actions.Field(i).Interface().(run); ok {
+		if action, ok := actions.Field(i).Interface().(common.Run); ok {
 			action.Stop()
 		}
 	}

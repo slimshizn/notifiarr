@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Notifiarr/notifiarr/pkg/mnd"
-	"github.com/hako/durafmt"
-	"github.com/shirou/gopsutil/v3/process"
+	"github.com/shirou/gopsutil/v4/process"
 )
 
 // ProcInfo is derived from a pid.
@@ -73,7 +73,7 @@ func (s *Service) checkProccess(ctx context.Context) *result {
 	if err != nil {
 		return &result{
 			state:  StateUnknown,
-			output: "process list error: " + err.Error(),
+			output: &Output{str: "process list error: " + err.Error()},
 		}
 	}
 
@@ -105,8 +105,8 @@ func (s *Service) getProcessResults(ctx context.Context, processes []*process.Pr
 			if !procinfo.Created.IsZero() && s.svc.proc.restarts && time.Since(procinfo.Created) < s.Interval.Duration {
 				return &result{
 					state: StateCritical,
-					output: fmt.Sprintf("%s: process restarted since last check, age: %v, pid: %d, proc: %s",
-						s.Value, time.Since(procinfo.Created), proc.Pid, procinfo.CmdLine),
+					output: &Output{str: fmt.Sprintf("%s: process restarted since last check, age: %v, pid: %d, proc: %s",
+						s.Value, time.Since(procinfo.Created), proc.Pid, procinfo.CmdLine)},
 				}
 			}
 		}
@@ -127,24 +127,29 @@ func (s *Service) checkProcessCounts(pids []int32, ages []time.Time) *result {
 	case count < s.svc.proc.countMin: // not enough running!
 		return &result{
 			state:  StateCritical,
-			output: fmt.Sprintf("%s: found %d processes; %s%s%s%s", s.Value, count, min, max, age, pid),
+			output: &Output{str: fmt.Sprintf("%s: found %d processes; %s%s%s%s", s.Value, count, min, max, age, pid)},
 		}
 	case s.svc.proc.running && count > 0: // running but should not be!
 		return &result{
 			state:  StateCritical,
-			output: fmt.Sprintf("%s: found %d processes; expected: 0%s%s", s.Value, count, age, pid),
+			output: &Output{str: fmt.Sprintf("%s: found %d processes; expected: 0%s%s", s.Value, count, age, pid)},
 		}
 	default: // running within thresholds!
 		return &result{
 			state:  StateOK,
-			output: fmt.Sprintf("%s: found %d processes; %s%s%s%s", s.Value, count, min, max, age, pid),
+			output: &Output{str: fmt.Sprintf("%s: found %d processes; %s%s%s%s", s.Value, count, min, max, age, pid)},
 		}
 	}
 }
 
 // getProcessStrings compiles output strings for a process service check.
-func (s *Service) getProcessStrings(pids []int32, ages []time.Time) (min, max, age, pid string) {
-	if min = "min: 1"; s.svc.proc.countMin > 0 { // min always exists.
+func (s *Service) getProcessStrings(pids []int32, ages []time.Time) (string, string, string, string) {
+	var (
+		min           = "min: 1"
+		max, age, pid string
+	)
+
+	if s.svc.proc.countMin > 0 { // min always exists.
 		min = fmt.Sprintf("min: %d", s.svc.proc.countMin)
 	}
 
@@ -153,7 +158,7 @@ func (s *Service) getProcessStrings(pids []int32, ages []time.Time) (min, max, a
 	}
 
 	if len(ages) == 1 && !ages[0].IsZero() {
-		age = fmt.Sprintf(", age: %v", durafmt.ParseShort(time.Since(ages[0]).Round(time.Second)))
+		age = mnd.DurationAge(ages[0])
 	}
 
 	for _, activePid := range pids {
@@ -163,10 +168,10 @@ func (s *Service) getProcessStrings(pids []int32, ages []time.Time) (min, max, a
 			pid += ";"
 		}
 
-		pid += fmt.Sprintf("%v", activePid)
+		pid += strconv.Itoa(int(activePid))
 	}
 
-	return
+	return min, max, age, pid
 }
 
 // getProcInfo returns age and cli args for a process.

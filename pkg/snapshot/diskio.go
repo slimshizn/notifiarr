@@ -15,7 +15,7 @@ import (
 	"sync"
 
 	"github.com/Notifiarr/notifiarr/pkg/mnd"
-	"github.com/shirou/gopsutil/v3/disk"
+	"github.com/shirou/gopsutil/v4/disk"
 )
 
 /* This files has procedures to structure data from iotop and iostat. */
@@ -130,13 +130,13 @@ func (s *Snapshot) scanIOTop(stdout *bufio.Scanner, wg *sync.WaitGroup) {
 		case strings.Contains(text, "illegal option"):
 			return
 			// it's a bad command wrong OS.
-		case len(fields) < 10, fields[0] == "PID": //nolint:gomnd
+		case len(fields) < 10, fields[0] == "PID": //nolint:mnd
 			// PID  PRIO  USER     DISK READ  DISK WRITE  SWAPIN      IO    COMMAND
 			// not enough fields, or header row.
 			continue
 		case fields[0] == "Total":
 			//	Total DISK READ:         0.00 K/s | Total DISK WRITE:         0.00 K/s
-			if nums := regex.FindAllString(text, 2); len(nums) == 2 { //nolint:gomnd
+			if nums := regex.FindAllString(text, 2); len(nums) == 2 { //nolint:mnd
 				s.IOTop.TotalRead, _ = strconv.ParseFloat(nums[0], mnd.Bits64)
 				s.IOTop.TotalWrite, _ = strconv.ParseFloat(nums[1], mnd.Bits64)
 				s.IOTop.TotalRead *= mnd.Kilobyte  // convert to bytes.
@@ -144,13 +144,13 @@ func (s *Snapshot) scanIOTop(stdout *bufio.Scanner, wg *sync.WaitGroup) {
 			}
 		case fields[0] == "Current", fields[0] == "Actual":
 			//	Current DISK READ:       0.00 K/s | Current DISK WRITE:       0.00 K/s
-			if nums := regex.FindAllString(text, 2); len(nums) == 2 { //nolint:gomnd
+			if nums := regex.FindAllString(text, 2); len(nums) == 2 { //nolint:mnd
 				s.IOTop.CurrRead, _ = strconv.ParseFloat(nums[0], mnd.Bits64)
 				s.IOTop.CurrWrite, _ = strconv.ParseFloat(nums[1], mnd.Bits64)
 				s.IOTop.CurrRead *= mnd.Kilobyte  // convert to bytes.
 				s.IOTop.CurrWrite *= mnd.Kilobyte // convert to bytes.
 			}
-		case len(fields) >= 12: //nolint:gomnd
+		case len(fields) >= 12: //nolint:mnd
 			// 780711 be/4 david       0.00 K/s    0.00 K/s  0.00 %  0.00 % pulseaudio --daemonize=no --log-target=journal
 			proc := &IOTopProc{
 				// Pid:   fields[0]
@@ -208,26 +208,26 @@ func (s *Snapshot) getIoStat(ctx context.Context, run bool) error {
 		return fmt.Errorf("%v: %w: %s", cmd.Args, err, e)
 	}
 
-	var v IoStatData
-	if err = json.NewDecoder(stdout).Decode(&v); err != nil {
+	var output IoStatData
+	if err = json.NewDecoder(stdout).Decode(&output); err != nil {
 		return fmt.Errorf("%v: output error: %w, %s", cmd.Args, err, stderr)
 	}
 
-	if len(v.Sysstat.Hosts) > 0 && len(v.Sysstat.Hosts[0].Statistics) > 0 {
-		s.IOStat = &v.Sysstat.Hosts[0].Statistics[0].Disk
+	if len(output.Sysstat.Hosts) > 0 && len(output.Sysstat.Hosts[0].Statistics) > 0 {
+		s.IOStat = &output.Sysstat.Hosts[0].Statistics[0].Disk
 	}
 
 	return nil
 }
 
 // getIoStat2 works on most platforms, but returns unusual data.
-func (s *Snapshot) getIoStat2(ctx context.Context, run bool) (err error) {
+func (s *Snapshot) getIoStat2(ctx context.Context, run bool) error {
 	if !run {
 		return nil
 	}
 
-	s.IOStat2, err = disk.IOCountersWithContext(ctx)
-	if err != nil {
+	var err error
+	if s.IOStat2, err = disk.IOCountersWithContext(ctx); err != nil {
 		return fmt.Errorf("disk IO counters: %w", err)
 	}
 

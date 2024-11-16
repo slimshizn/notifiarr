@@ -2,7 +2,6 @@ package plexcron
 
 import (
 	"context"
-	"math/rand"
 	"sync"
 	"time"
 
@@ -12,6 +11,7 @@ import (
 	"github.com/Notifiarr/notifiarr/pkg/triggers/common"
 	"github.com/Notifiarr/notifiarr/pkg/website"
 	"github.com/Notifiarr/notifiarr/pkg/website/clientinfo"
+	"golift.io/cnfg"
 )
 
 const (
@@ -65,17 +65,17 @@ func (a *Action) Create() {
 }
 
 func (c *cmd) run() {
-	ci := clientinfo.Get()
-	if !c.Plex.Enabled() || ci == nil {
+	info := clientinfo.Get()
+	if !c.Plex.Enabled() || info == nil {
 		return
 	}
 
-	var ticker *time.Ticker
+	var dur time.Duration
 
-	cfg := ci.Actions.Plex
+	cfg := info.Actions.Plex
 	if cfg.Interval.Duration > 0 {
-		randomTime := time.Duration(rand.Intn(randomMilliseconds)) * time.Millisecond //nolint:gosec
-		ticker = time.NewTicker(cfg.Interval.Duration + randomTime)
+		randomTime := time.Duration(c.Config.Rand().Intn(randomMilliseconds)) * time.Millisecond
+		dur = cfg.Interval.Duration + randomTime
 		c.Printf("==> Plex Sessions Collection Started, URL: %s, interval:%s timeout:%s webhook_cooldown:%v delay:%v",
 			c.Plex.URL, cfg.Interval, c.Plex.Timeout, cfg.Cooldown, cfg.Delay)
 	}
@@ -84,44 +84,48 @@ func (c *cmd) run() {
 		Name: TrigPlexSessions,
 		Fn:   c.sendPlexSessions,
 		C:    make(chan *common.ActionInput, 1),
-		T:    ticker,
+		D:    cnfg.Duration{Duration: dur},
 	})
 
 	if cfg.MoviesPC != 0 || cfg.SeriesPC != 0 || cfg.TrackSess {
 		c.Printf("==> Plex Sessions Tracker Started, URL: %s, interval:1m timeout:%s movies:%d%% series:%d%% play:%v",
 			c.Plex.URL, c.Plex.Timeout, cfg.MoviesPC, cfg.SeriesPC, cfg.TrackSess)
+
 		c.Add(&common.Action{
 			Name: "Checking Plex for completed sessions.",
 			Hide: true, // do not log this one.
 			Fn:   c.checkForFinishedItems,
-			T:    time.NewTicker(time.Minute + time.Duration(rand.Intn(randomMilliseconds2))*time.Millisecond), //nolint:gosec
+			D: cnfg.Duration{Duration: time.Minute +
+				time.Duration(c.Config.Rand().Intn(randomMilliseconds2))*time.Millisecond},
 		})
 	}
 }
 
 // SendWebhook is called in a go routine after a plex media.play webhook is received.
 func (a *Action) SendWebhook(hook *plex.IncomingWebhook) {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		defer cancel()
-
-		a.cmd.sendWebhook(ctx, hook)
-	}()
+	go a.cmd.sendWebhook(hook)
 }
 
-func (c *cmd) sendWebhook(ctx context.Context, hook *plex.IncomingWebhook) {
+func (c *cmd) sendWebhook(hook *plex.IncomingWebhook) {
 	sessions := &plex.Sessions{Name: c.Plex.Server.Name()}
 	ci := clientinfo.Get()
+	ctx := context.Background()
 
 	// If NoActivity=false, then grab sessions, but wait 'Delay' to make sure they're updated.
 	if ci != nil && !ci.Actions.Plex.NoActivity {
 		time.Sleep(ci.Actions.Plex.Delay.Duration)
+		ctx, cancel := context.WithTimeout(ctx, c.Plex.Timeout.Duration)
 
 		var err error
 		if sessions, err = c.getSessions(ctx, time.Second); err != nil {
 			c.Errorf("Getting Plex sessions: %v", err)
 		}
+
+		cancel()
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second) //nolint:mnd // wait max 5 seconds for system info.
+	defer cancel()
 
 	c.SendData(&website.Request{
 		Route:      website.PlexRoute,
@@ -137,38 +141,43 @@ func (a *Action) GetSessions(ctx context.Context) (*plex.Sessions, error) {
 	return a.cmd.getSessions(ctx, time.Minute)
 }
 
+// GetMetaSnap grabs some basic system info: cpu, memory, username. Gets added to Plex sessions and webhook payloads.
+func (a *Action) GetMetaSnap(ctx context.Context) *snapshot.Snapshot {
+	return a.cmd.getMetaSnap(ctx)
+}
+
 // getMetaSnap grabs some basic system info: cpu, memory, username. Gets added to Plex sessions and webhook payloads.
 func (c *cmd) getMetaSnap(ctx context.Context) *snapshot.Snapshot {
 	var (
 		snap = &snapshot.Snapshot{}
-		wg   sync.WaitGroup
+		wait sync.WaitGroup
 	)
 
-	wg.Add(1)
+	wait.Add(1)
 
 	go func() {
-		defer wg.Done()
+		defer wait.Done()
 
 		_ = snap.GetCPUSample(ctx)
 	}()
 
-	wg.Add(1)
+	wait.Add(1)
 
 	go func() {
-		defer wg.Done()
+		defer wait.Done()
 
 		_ = snap.GetMemoryUsage(ctx)
 	}()
 
-	wg.Add(1)
+	wait.Add(1)
 
 	go func() {
-		defer wg.Done()
+		defer wait.Done()
 
 		_ = snap.GetLocalData(ctx)
 	}()
 
-	wg.Wait()
+	wait.Wait()
 
 	return snap
 }

@@ -4,25 +4,33 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Notifiarr/notifiarr/pkg/triggers/common"
 	"github.com/Notifiarr/notifiarr/pkg/website"
 	"github.com/Notifiarr/notifiarr/pkg/website/clientinfo"
+	"github.com/hako/durafmt"
 	"golift.io/cnfg"
 )
 
 // TrigPollSite is our site polling trigger identifier.
-const TrigPollSite common.TriggerName = "Polling Notifiarr for new settings."
+const (
+	TrigPollSite common.TriggerName = "Polling Notifiarr for new settings."
+	TrigUpCheck  common.TriggerName = "Telling Notifiarr website we are still up!"
+)
 
 const (
 	// How often to poll the website for changes.
 	// This only fires when:
-	// 1. the cliet isn't reachable from the website.
+	// 1. the client isn't reachable from the website.
 	// 2. the client didn't get a valid response to clientInfo.
-	pollDur            = 4 * time.Minute
+	pollDur = 4 * time.Minute
+	// This just tells the website the client is up.
+	upCheckDur = 14*time.Minute + 57*time.Second
+	// How long to be up before sending first up check.
+	checkWait          = 1*time.Minute + 23*time.Second
 	randomMilliseconds = 5000
 	randomSeconds      = 30
 )
@@ -35,6 +43,8 @@ type Action struct {
 type cmd struct {
 	*common.Config
 	list []*Timer
+	sync.Mutex
+	stop bool
 }
 
 // Timer is used to trigger actions.
@@ -59,7 +69,7 @@ func (t *Timer) Run(input *common.ActionInput) {
 }
 
 // run responds to the channel that the timer fired into.
-func (t *Timer) run(ctx context.Context, input *common.ActionInput) {
+func (t *Timer) run(_ context.Context, input *common.ActionInput) {
 	t.website.SendData(&website.Request{
 		Route:      website.Route(t.URI),
 		Event:      input.Type,
@@ -79,24 +89,49 @@ func (a *Action) Create() {
 	a.cmd.create()
 }
 
-func (c *cmd) create() {
-	ci := clientinfo.Get()
-	// This poller is sorta shoehorned in here for lack of a better place to put it.
-	if ci == nil || ci.Actions.Poll {
-		c.Printf("==> Started Notifiarr Poller, have_clientinfo:%v interval:%s",
-			ci != nil, cnfg.Duration{Duration: pollDur.Round(time.Second)})
-		c.Add(&common.Action{
-			Name: TrigPollSite,
-			Fn:   c.PollForReload,
-			T:    time.NewTicker(pollDur + time.Duration(rand.Intn(randomSeconds))*time.Second), //nolint:gosec
-		})
-	}
+// Stop satisfies an interface.
+func (a *Action) Stop() {
+	a.cmd.Lock()
+	defer a.cmd.Unlock()
+	a.cmd.stop = true
+}
 
-	if ci == nil {
+// Verify the interfaces are satisfied.
+var (
+	_ = common.Run(&Action{nil})
+	_ = common.Create(&Action{nil})
+)
+
+// Run fires in a go routine. Wait a minute or two then tell the website we're up.
+// If app reloads in first checkWait duration, this throws an error. That's ok.
+func (a *Action) Run(ctx context.Context) {
+	if a.cmd.ValidAPIKey() == nil {
+		time.Sleep(checkWait)
+		a.cmd.Lock()
+		defer a.cmd.Unlock()
+
+		if !a.cmd.stop { // Wait a while then make sure we didn't stop.
+			a.cmd.PollUpCheck(ctx, &common.ActionInput{Type: website.EventStart})
+		}
+	}
+}
+
+func (c *cmd) create() {
+	info := clientinfo.Get()
+	// This poller is sorta shoehorned in here for lack of a better place to put it.
+	if info == nil {
+		c.startWebsitePoller()
 		return
 	}
 
-	for _, custom := range ci.Actions.Custom {
+	c.Printf("==> Started Notifiarr Website Up-Checker, interval: %s", durafmt.Parse(upCheckDur))
+	c.Add(&common.Action{
+		Name: TrigUpCheck,
+		Fn:   c.PollUpCheck,
+		D:    cnfg.Duration{Duration: upCheckDur},
+	})
+
+	for _, custom := range info.Actions.Custom {
 		timer := &Timer{
 			CronConfig: custom,
 			ch:         make(chan *common.ActionInput, 1),
@@ -104,14 +139,11 @@ func (c *cmd) create() {
 		}
 		custom.URI = "/" + strings.TrimPrefix(custom.URI, "/")
 
-		var ticker *time.Ticker
-
 		if custom.Interval.Duration < time.Minute {
-			c.Errorf("Website provided custom cron interval under 1 minute. Ignored! Interval: %s Name: %s, URI: %s",
+			c.ErrorfNoShare("Website provided custom cron interval under 1 minute. Interval: %s Name: %s, URI: %s",
 				custom.Interval, custom.Name, custom.URI)
-		} else {
-			randomTime := time.Duration(rand.Intn(randomMilliseconds)) * time.Millisecond //nolint:gosec
-			ticker = time.NewTicker(custom.Interval.Duration + randomTime)
+
+			custom.Interval.Duration = time.Minute
 		}
 
 		c.list = append(c.list, timer)
@@ -120,42 +152,63 @@ func (c *cmd) create() {
 			Name: common.TriggerName(fmt.Sprintf("Running Custom Cron Timer '%s'", custom.Name)),
 			Fn:   timer.run,
 			C:    timer.ch,
-			T:    ticker,
+			D:    cnfg.Duration{Duration: custom.Interval.Duration},
 		})
 	}
 
-	c.Printf("==> Custom Timers Enabled: %d timers provided", len(ci.Actions.Custom))
+	c.Printf("==> Custom Timers Enabled: %d timers provided", len(info.Actions.Custom))
 }
 
-// PollForReload checks if the website wants the client to reload (new settings).
+func (c *cmd) startWebsitePoller() {
+	if c.ValidAPIKey() != nil {
+		return // only poll if the api key length is valid.
+	}
+
+	c.Printf("==> Started Notifiarr Website Poller, interval: %s", durafmt.Parse(pollDur))
+	c.Add(&common.Action{
+		Name: TrigPollSite,
+		Fn:   c.PollForReload,
+		D:    cnfg.Duration{Duration: pollDur + time.Duration(c.Config.Rand().Intn(randomSeconds))*time.Second},
+	})
+}
+
+// PollUpCheck just tells the website the client is still up. It doesn't process the return payload.
+func (c *cmd) PollUpCheck(_ context.Context, input *common.ActionInput) {
+	c.SendData(&website.Request{
+		Route:      website.ClientRoute,
+		Event:      website.EventCheck,
+		Payload:    map[string]any{"up": input.Type},
+		LogPayload: true,
+		ErrorsOnly: true,
+	})
+}
+
+// PollForReload is only started if the initial connection to the website failed.
+// This will keep checking until it works, then reload to grab settings and start properly.
 func (c *cmd) PollForReload(ctx context.Context, input *common.ActionInput) {
 	body, err := c.GetData(&website.Request{
 		Route:      website.ClientRoute,
 		Event:      website.EventPoll,
-		Payload:    c.CIC.Info(ctx, true), // true avoids polling tautulli.
+		Payload:    c.CI.Info(ctx, true), // true avoids polling tautulli.
 		LogPayload: true,
 	})
 	if err != nil {
-		c.Errorf("[%s requested] Polling Notifiarr: %v", input.Type, err)
+		c.ErrorfNoShare("[%s requested] Polling Notifiarr: %v", input.Type, err)
 		return
 	}
 
-	var v struct {
+	var resp struct {
 		Reload     bool      `json:"reload"`
 		LastSync   time.Time `json:"lastSync"`
 		LastChange time.Time `json:"lastChange"`
 	}
 
-	if err = json.Unmarshal(body.Details.Response, &v); err != nil {
-		c.Errorf("[%s requested] Polling Notifiarr: %v", input.Type, err)
+	if err = json.Unmarshal(body.Details.Response, &resp); err != nil {
+		c.ErrorfNoShare("[%s requested] Polling Notifiarr: %v", input.Type, err)
 		return
 	}
 
-	if v.Reload {
-		c.Printf("[%s requested] Website indicated new configurations; reloading to pick them up!"+
-			" Last Sync: %v, Last Change: %v, Diff: %v", input.Type, v.LastSync, v.LastChange, v.LastSync.Sub(v.LastChange))
-		defer c.ReloadApp("poll triggered reload")
-	} else if ci := clientinfo.Get(); ci == nil {
+	if ci := clientinfo.Get(); ci == nil {
 		c.Printf("[%s requested] API Key checked out, reloading to pick up configuration from website!", input.Type)
 		defer c.ReloadApp("client info reload")
 	}

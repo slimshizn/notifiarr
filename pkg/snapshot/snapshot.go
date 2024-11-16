@@ -16,10 +16,10 @@ import (
 	"time"
 
 	"github.com/Notifiarr/notifiarr/pkg/mnd"
-	"github.com/shirou/gopsutil/v3/cpu"
-	"github.com/shirou/gopsutil/v3/disk"
-	"github.com/shirou/gopsutil/v3/host"
-	"github.com/shirou/gopsutil/v3/load"
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/disk"
+	"github.com/shirou/gopsutil/v4/host"
+	"github.com/shirou/gopsutil/v4/load"
 	"golift.io/cnfg"
 	"golift.io/version"
 )
@@ -38,38 +38,40 @@ const (
 //
 //nolint:lll
 type Config struct {
-	Timeout   cnfg.Duration `toml:"timeout" xml:"timeout" json:"timeout"`                     // total run time allowed.
-	Interval  cnfg.Duration `toml:"interval" xml:"interval" json:"interval"`                  // how often to send snaps (cron).
-	ZFSPools  []string      `toml:"zfs_pools" xml:"zfs_pool" json:"zfsPools"`                 // zfs pools to monitor.
-	UseSudo   bool          `toml:"use_sudo" xml:"use_sudo" json:"useSudo"`                   // use sudo for smartctl commands.
-	Raid      bool          `toml:"monitor_raid" xml:"monitor_raid" json:"monitorRaid"`       // include mdstat and/or megaraid.
-	DriveData bool          `toml:"monitor_drives" xml:"monitor_drives" json:"monitorDrives"` // smartctl commands.
-	DiskUsage bool          `toml:"monitor_space" xml:"monitor_space" json:"monitorSpace"`    // get disk usage.
-	AllDrives bool          `toml:"all_drives" xml:"all_drives" json:"allDrives"`             // usage for all drives?
-	Quotas    bool          `toml:"quotas" xml:"quotas" json:"quotas"`                        // usage for user quotas?
-	IOTop     int           `toml:"iotop" xml:"iotop" json:"ioTop"`                           // number of processes to include from ioTop
-	PSTop     int           `toml:"pstop" xml:"pstop" json:"psTop"`                           // number of processes to include from top (cpu usage)
-	MyTop     int           `toml:"mytop" xml:"mytop" json:"myTop"`                           // number of processes to include from mysql servers.
-	*Plugins
-	// Debug     bool          `toml:"debug" xml:"debug" json:"debug"`
+	Timeout   cnfg.Duration `json:"timeout"       toml:"timeout"        xml:"timeout"`        // total run time allowed.
+	Interval  cnfg.Duration `json:"interval"      toml:"interval"       xml:"interval"`       // how often to send snaps (cron).
+	ZFSPools  []string      `json:"zfsPools"      toml:"zfs_pools"      xml:"zfs_pool"`       // zfs pools to monitor.
+	UseSudo   bool          `json:"useSudo"       toml:"use_sudo"       xml:"use_sudo"`       // use sudo for smartctl commands.
+	Raid      bool          `json:"monitorRaid"   toml:"monitor_raid"   xml:"monitor_raid"`   // include mdstat and/or megaraid.
+	DriveData bool          `json:"monitorDrives" toml:"monitor_drives" xml:"monitor_drives"` // smartctl commands.
+	DiskUsage bool          `json:"monitorSpace"  toml:"monitor_space"  xml:"monitor_space"`  // get disk usage.
+	AllDrives bool          `json:"allDrives"     toml:"all_drives"     xml:"all_drives"`     // usage for all drives?
+	Quotas    bool          `json:"quotas"        toml:"quotas"         xml:"quotas"`         // usage for user quotas?
+	IOTop     int           `json:"ioTop"         toml:"iotop"          xml:"iotop"`          // number of processes to include from ioTop
+	PSTop     int           `json:"psTop"         toml:"pstop"          xml:"pstop"`          // number of processes to include from top (cpu usage)
+	MyTop     int           `json:"myTop"         toml:"mytop"          xml:"mytop"`          // number of processes to include from mysql servers.
+	IPMI      bool          `json:"ipmi"          toml:"ipmi"           xml:"ipmi"`           // get ipmi sensor info.
+	IPMISudo  bool          `json:"ipmiSudo"      toml:"ipmiSudo"       xml:"ipmiSudo"`       // use sudo to get ipmi sensor info.
+	Plugins
 }
 
 // Plugins is optional configuration for "plugins".
 type Plugins struct {
-	Nvidia *NvidiaConfig  `toml:"nvidia" xml:"nvidia" json:"nvidia"`
-	MySQL  []*MySQLConfig `toml:"mysql" xml:"mysql" json:"mysql"`
+	Nvidia *NvidiaConfig  `json:"nvidia" toml:"nvidia" xml:"nvidia"`
+	MySQL  []*MySQLConfig `json:"mysql"  toml:"mysql"  xml:"mysql"`
 }
 
 // Errors this package generates.
 var (
-	ErrPlatformUnsup = fmt.Errorf("the requested metric is not available on this platform, " +
+	ErrPlatformUnsup = errors.New("the requested metric is not available on this platform, " +
 		"if you know how to collect it, please open an issue on the github repo")
-	ErrNonZeroExit = fmt.Errorf("cmd exited non-zero")
+	ErrNonZeroExit = errors.New("cmd exited non-zero")
 )
 
 // Snapshot is the output data sent to Notifiarr.
 type Snapshot struct {
-	Version string `json:"version"`
+	Debug   func(string, ...any) `json:"-"`
+	Version string               `json:"version"`
 	System  struct {
 		*host.InfoStat
 		Username string             `json:"username"`
@@ -95,6 +97,8 @@ type Snapshot struct {
 	Processes  Processes                      `json:"processes,omitempty"`
 	MySQL      map[string]*MySQLServerData    `json:"mysql,omitempty"`
 	Nvidia     []*NvidiaOutput                `json:"nvidia,omitempty"`
+	Sensors    []*IPMISensor                  `json:"ipmiSensors"`
+	Synology   *Synology                      `json:"synology,omitempty"`
 }
 
 // RaidData contains raid information from mdstat and/or megacli.
@@ -105,10 +109,13 @@ type RaidData struct {
 
 // Partition is used for ZFS pools as well as normal Disk arrays.
 type Partition struct {
-	Device string `json:"name"`
-	Total  uint64 `json:"total"`
-	Free   uint64 `json:"free"`
-	Used   uint64 `json:"used"`
+	Device   string   `json:"name"`
+	Total    uint64   `json:"total"`
+	Free     uint64   `json:"free"`
+	Used     uint64   `json:"used"`
+	FSType   string   `json:"fsType,omitempty"`
+	ReadOnly bool     `json:"readOnly,omitempty"`
+	Opts     []string `json:"opts,omitempty"`
 }
 
 // Validate makes sure the snapshot configuration is valid.
@@ -128,6 +135,7 @@ func (c *Config) Validate() {
 
 	if mnd.IsDocker || mnd.IsWindows {
 		c.UseSudo = false
+		c.IPMISudo = false
 	}
 
 	if mnd.IsDocker || !mnd.IsLinux {
@@ -136,11 +144,11 @@ func (c *Config) Validate() {
 }
 
 // GetSnapshot returns a system snapshot based on requested data in the config.
-func (c *Config) GetSnapshot(ctx context.Context) (*Snapshot, []error, []error) {
+func (c *Config) GetSnapshot(ctx context.Context, debugf func(string, ...any)) (*Snapshot, []error, []error) {
 	ctx, cancel := context.WithTimeout(ctx, c.Timeout.Duration)
 	defer cancel()
 
-	snap := &Snapshot{Version: version.Version + "-" + version.Revision}
+	snap := &Snapshot{Version: version.Version + "-" + version.Revision, Debug: debugf}
 	errs, debug := c.getSnapshot(ctx, snap)
 
 	return snap, errs, debug
@@ -153,10 +161,11 @@ func (c *Config) getSnapshot(ctx context.Context, snap *Snapshot) ([]error, []er
 		errs = append(errs, err...)
 	}
 
-	if syn, err := GetSynology(); err != nil && !errors.Is(err, ErrNotSynology) {
+	var err error
+	if snap.Synology, err = GetSynology(true); err != nil && !errors.Is(err, ErrNotSynology) {
 		errs = append(errs, err)
-	} else if syn != nil {
-		syn.SetInfo(snap.System.InfoStat)
+	} else if snap.Synology != nil {
+		snap.Synology.SetInfo(snap.System.InfoStat)
 	}
 
 	if err := snap.getDisksUsage(ctx, c.DiskUsage, c.AllDrives); len(err) != 0 {
@@ -185,6 +194,7 @@ func (c *Config) getSnapshot(ctx context.Context, snap *Snapshot) ([]error, []er
 	errs = append(errs, snap.getIoStat(ctx, c.DiskUsage && mnd.IsLinux))
 	errs = append(errs, snap.getIoStat2(ctx, c.DiskUsage))
 	errs = append(errs, snap.GetNvidia(ctx, c.Nvidia))
+	errs = append(errs, snap.GetIPMI(ctx, c.IPMI, c.IPMISudo))
 
 	return errs, debug
 }

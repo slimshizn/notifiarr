@@ -17,31 +17,38 @@ import (
 /* This is a helper method to check if an IP is in a list/cidr. */
 
 // AllowedIPs determines who can set x-forwarded-for.
-type AllowedIPs []*net.IPNet
+type AllowedIPs struct {
+	Input []string
+	Nets  []*net.IPNet
+}
 
-var _ = fmt.Stringer(AllowedIPs(nil))
+var _ = fmt.Stringer(AllowedIPs{})
 
 // String turns a list of allowedIPs into a printable masterpiece.
-func (n AllowedIPs) String() (s string) {
-	if len(n) < 1 {
+func (n AllowedIPs) String() string {
+	if len(n.Nets) < 1 {
 		return "(none)"
 	}
 
-	for i := range n {
-		if s != "" {
-			s += ", "
+	var output string
+
+	for i := range n.Nets {
+		if output != "" {
+			output += ", "
 		}
 
-		s += n[i].String()
+		output += n.Nets[i].String()
 	}
 
-	return s
+	return output
 }
 
 // Contains returns true if an IP is allowed.
 func (n AllowedIPs) Contains(ip string) bool {
-	for i := range n {
-		if n[i].Contains(net.ParseIP(ip)) {
+	ip = strings.Trim(ip[:strings.LastIndex(ip, ":")], "[]")
+
+	for i := range n.Nets {
+		if n.Nets[i].Contains(net.ParseIP(ip)) {
 			return true
 		}
 	}
@@ -51,8 +58,15 @@ func (n AllowedIPs) Contains(ip string) bool {
 
 // MakeIPs turns a list of CIDR strings (or plain IPs) into a list of net.IPNet.
 // This "allowed" list is later used to check incoming IPs from web requests.
-func MakeIPs(upstreams []string) (a AllowedIPs) {
-	for _, ipAddr := range upstreams {
+func MakeIPs(upstreams []string) AllowedIPs {
+	allowed := AllowedIPs{
+		Input: make([]string, len(upstreams)),
+		Nets:  []*net.IPNet{},
+	}
+
+	for idx, ipAddr := range upstreams {
+		allowed.Input[idx] = ipAddr
+
 		if !strings.Contains(ipAddr, "/") {
 			if strings.Contains(ipAddr, ":") {
 				ipAddr += "/128"
@@ -62,11 +76,11 @@ func MakeIPs(upstreams []string) (a AllowedIPs) {
 		}
 
 		if _, i, err := net.ParseCIDR(ipAddr); err == nil {
-			a = append(a, i)
+			allowed.Nets = append(allowed.Nets, i)
 		}
 	}
 
-	return a
+	return allowed
 }
 
 // CheckPort attempts to bind to a port to check if it's in use or not.
@@ -143,7 +157,7 @@ func deleteOldBackups(backupDir string) {
 	}
 
 	// Keep newest 10 files.
-	for i := 0; i < len(fileList)-9; i++ {
+	for i := range len(fileList) - 9 {
 		os.Remove(filepath.Join(backupDir, fileList[i].Name()))
 	}
 }

@@ -1,13 +1,13 @@
 package cfsync
 
 import (
-	"math/rand"
 	"strings"
 	"time"
 
 	"github.com/Notifiarr/notifiarr/pkg/apps"
 	"github.com/Notifiarr/notifiarr/pkg/triggers/common"
 	"github.com/Notifiarr/notifiarr/pkg/website/clientinfo"
+	"golift.io/cnfg"
 )
 
 /* CF Sync means Custom Format Sync. This is a premium feature that allows syncing
@@ -43,44 +43,77 @@ func (a *Action) Create() {
 }
 
 func (c *cmd) create() {
-	ci := clientinfo.Get()
-	c.setupRadarr(ci)
-	c.setupSonarr(ci)
-
-	var (
-		radarrTicker *time.Ticker
-		sonarrTicker *time.Ticker
-	)
+	info := clientinfo.Get()
+	c.setupRadarr(info)
+	c.setupSonarr(info)
+	c.setupLidarr(info)
 
 	// Check each instance and enable only if needed.
-	//nolint:gosec
-	if ci != nil && ci.Actions.Sync.Interval.Duration > 0 {
-		if len(ci.Actions.Sync.RadarrInstances) > 0 {
-			randomTime := time.Duration(rand.Intn(randomMilliseconds)) * time.Millisecond
-			radarrTicker = time.NewTicker(ci.Actions.Sync.Interval.Duration + randomTime)
+	if info != nil && info.Actions.Sync.Interval.Duration > 0 {
+		if len(info.Actions.Sync.RadarrInstances) > 0 {
 			c.Printf("==> Radarr TRaSH Sync: interval: %s, %s ",
-				ci.Actions.Sync.Interval, strings.Join(ci.Actions.Sync.RadarrSync, ", "))
+				info.Actions.Sync.Interval, strings.Join(info.Actions.Sync.RadarrSync, ", "))
 		}
 
-		if len(ci.Actions.Sync.SonarrInstances) > 0 {
-			randomTime := time.Duration(rand.Intn(randomMilliseconds)) * time.Millisecond
-			sonarrTicker = time.NewTicker(ci.Actions.Sync.Interval.Duration + randomTime)
+		if len(info.Actions.Sync.SonarrInstances) > 0 {
 			c.Printf("==> Sonarr TRaSH Sync: interval: %s, %s ",
-				ci.Actions.Sync.Interval, strings.Join(ci.Actions.Sync.SonarrSync, ", "))
+				info.Actions.Sync.Interval, strings.Join(info.Actions.Sync.SonarrSync, ", "))
+		}
+
+		if len(info.Actions.Sync.LidarrInstances) > 0 {
+			c.Printf("==> Lidarr profile and format sync interval: %s, %s",
+				info.Actions.Sync.Interval, strings.Join(info.Actions.Sync.SonarrSync, ", "))
 		}
 	}
 
+	// These aggregate triggers have no timers. Used to sync "all the things" at once.
 	c.Add(&common.Action{
 		Name: TrigCFSyncRadarr,
 		Fn:   c.syncRadarr,
 		C:    make(chan *common.ActionInput, 1),
-		T:    radarrTicker,
 	}, &common.Action{
 		Name: TrigRPSyncSonarr,
 		Fn:   c.syncSonarr,
 		C:    make(chan *common.ActionInput, 1),
-		T:    sonarrTicker,
+	}, &common.Action{
+		Name: TrigCFSyncLidarr,
+		Fn:   c.syncLidarr,
+		C:    make(chan *common.ActionInput, 1),
 	})
+}
+
+type lidarrApp struct {
+	app *apps.LidarrConfig
+	cmd *cmd
+	idx int
+}
+
+func (c *cmd) setupLidarr(info *clientinfo.ClientInfo) {
+	if info == nil {
+		return
+	}
+
+	for idx, app := range c.Apps.Lidarr {
+		instance := idx + 1
+		if !app.Enabled() || !info.Actions.Sync.LidarrInstances.Has(instance) {
+			continue
+		}
+
+		var dur cnfg.Duration
+
+		if info != nil && info.Actions.Sync.Interval.Duration > 0 {
+			randomTime := time.Duration(c.Config.Rand().Intn(randomMilliseconds)) * time.Millisecond
+			dur = cnfg.Duration{Duration: info.Actions.Sync.Interval.Duration + randomTime}
+		}
+
+		c.Add(&common.Action{
+			Hide: true,
+			D:    dur,
+			Name: TrigCFSyncLidarrInt.WithInstance(instance),
+			Fn:   (&lidarrApp{app: app, cmd: c, idx: idx}).syncLidarr,
+			C:    make(chan *common.ActionInput, 1),
+		})
+	}
 }
 
 type radarrApp struct {
@@ -89,30 +122,30 @@ type radarrApp struct {
 	idx int
 }
 
-func (c *cmd) setupRadarr(ci *clientinfo.ClientInfo) {
-	if ci == nil {
+func (c *cmd) setupRadarr(info *clientinfo.ClientInfo) {
+	if info == nil {
 		return
 	}
 
 	for idx, app := range c.Apps.Radarr {
 		instance := idx + 1
-		if !app.Enabled() || !ci.Actions.Sync.RadarrInstances.Has(instance) {
+		if !app.Enabled() || !info.Actions.Sync.RadarrInstances.Has(instance) {
 			continue
 		}
 
-		var ticker *time.Ticker
-		//nolint:gosec
-		if ci != nil && ci.Actions.Sync.Interval.Duration > 0 {
-			randomTime := time.Duration(rand.Intn(randomMilliseconds)) * time.Millisecond
-			ticker = time.NewTicker(ci.Actions.Sync.Interval.Duration + randomTime)
+		var dur cnfg.Duration
+
+		if info != nil && info.Actions.Sync.Interval.Duration > 0 {
+			randomTime := time.Duration(c.Config.Rand().Intn(randomMilliseconds)) * time.Millisecond
+			dur = cnfg.Duration{Duration: info.Actions.Sync.Interval.Duration + randomTime}
 		}
 
 		c.Add(&common.Action{
 			Hide: true,
+			D:    dur,
 			Name: TrigCFSyncRadarrInt.WithInstance(instance),
 			Fn:   (&radarrApp{app: app, cmd: c, idx: idx}).syncRadarr,
 			C:    make(chan *common.ActionInput, 1),
-			T:    ticker,
 		})
 	}
 }
@@ -123,30 +156,30 @@ type sonarrApp struct {
 	idx int
 }
 
-func (c *cmd) setupSonarr(ci *clientinfo.ClientInfo) {
-	if ci == nil {
+func (c *cmd) setupSonarr(info *clientinfo.ClientInfo) {
+	if info == nil {
 		return
 	}
 
 	for idx, app := range c.Apps.Sonarr {
 		instance := idx + 1
-		if !app.Enabled() || !ci.Actions.Sync.SonarrInstances.Has(instance) {
+		if !app.Enabled() || !info.Actions.Sync.SonarrInstances.Has(instance) {
 			continue
 		}
 
-		var ticker *time.Ticker
-		//nolint:gosec
-		if ci != nil && ci.Actions.Sync.Interval.Duration > 0 {
-			randomTime := time.Duration(rand.Intn(randomMilliseconds)) * time.Millisecond
-			ticker = time.NewTicker(ci.Actions.Sync.Interval.Duration + randomTime)
+		var dur cnfg.Duration
+
+		if info != nil && info.Actions.Sync.Interval.Duration > 0 {
+			randomTime := time.Duration(c.Config.Rand().Intn(randomMilliseconds)) * time.Millisecond
+			dur = cnfg.Duration{Duration: info.Actions.Sync.Interval.Duration + randomTime}
 		}
 
 		c.Add(&common.Action{
 			Hide: true,
+			D:    dur,
 			Name: TrigRPSyncSonarrInt.WithInstance(instance),
 			Fn:   (&sonarrApp{app: app, cmd: c, idx: idx}).syncSonarr,
 			C:    make(chan *common.ActionInput, 1),
-			T:    ticker,
 		})
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/Notifiarr/notifiarr/pkg/triggers/data"
 	"github.com/Notifiarr/notifiarr/pkg/website"
 	"github.com/Notifiarr/notifiarr/pkg/website/clientinfo"
+	"golift.io/cnfg"
 )
 
 const TrigSonarrQueue common.TriggerName = "Storing Sonarr instance %d queue."
@@ -50,29 +51,29 @@ func (c *cmd) setupSonarr() bool {
 	var enable bool
 
 	for idx, app := range c.Apps.Sonarr {
-		ci := clientinfo.Get()
-		if !app.Enabled() || ci == nil {
+		info := clientinfo.Get()
+		if !app.Enabled() || info == nil {
 			continue
 		}
 
-		var ticker *time.Ticker
+		var dur time.Duration
 
 		instance := idx + 1
-		if ci.Actions.Apps.Sonarr.Finished(instance) {
+		if info.Actions.Apps.Sonarr.Finished(instance) {
 			enable = true
-			ticker = time.NewTicker(finishedDuration)
-		} else if ci.Actions.Apps.Sonarr.Stuck(instance) {
+			dur = finishedDuration
+		} else if info.Actions.Apps.Sonarr.Stuck(instance) {
 			enable = true
-			ticker = time.NewTicker(stuckDuration)
+			dur = stuckDuration
 		}
 
-		if ticker != nil {
+		if dur != 0 {
 			c.Add(&common.Action{
 				Hide: true,
 				Name: TrigSonarrQueue.WithInstance(instance),
 				Fn:   (&sonarrApp{app: app, cmd: c, idx: idx}).storeQueue,
 				C:    make(chan *common.ActionInput, 1),
-				T:    ticker,
+				D:    cnfg.Duration{Duration: dur},
 			})
 		}
 	}

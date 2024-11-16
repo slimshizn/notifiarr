@@ -1,28 +1,19 @@
 issues:
-  exclude-rules:
-    # Exclude funlen for testing files.
-    - linters:
-        - nonamedreturns
-        - wsl
-        - cyclop
-        - nolintlint
-      path: 'cmd/'
+  max-issues-per-linter: 0
+  max-same-issues: 0
 linters:
   enable-all: true
   disable:
-    - maligned
-    - scopelint
-    - interfacer
-    - golint
-    - exhaustruct
-    - exhaustive
-    - exhaustivestruct
-    - dupl
-    - nlreturn
-    - nonamedreturns
-    - varnamelen
-    - ifshort
-    - nosnakecase # broken on syscall.
-    - godot
+  # deprecated
+    - gomnd
+    - execinquery
+  # unused
+    - exhaustruct # This will never work in this app.
+    - dupl        # Maybe one day we can reduce the duplicate code with generics.
+    - nlreturn    # Not needed because wsl is good enough; better actually.
+    - godot       # Does not work with annotations.
+    - depguard    # Not even sure why this is useful. We have too many deps to care.
 run:
   timeout: 5m
+output:
+  sort-results: true

@@ -1,6 +1,7 @@
 package services
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/Notifiarr/notifiarr/pkg/website"
@@ -8,7 +9,7 @@ import (
 
 const valuePrefix = "serviceCheck-"
 
-var ErrSvcsStopped = fmt.Errorf("service check routine stopped")
+var ErrSvcsStopped = errors.New("service check routine stopped")
 
 // RunChecks runs checks from an external package.
 func (c *Config) RunChecks(source website.EventType) {
@@ -100,6 +101,7 @@ func (s *Service) copyResults() *CheckResult {
 		Check:       s.Value,
 		Expect:      s.Expect,
 		IntervalDur: s.Interval.Duration,
+		Metadata:    s.Tags,
 	}
 }
 
@@ -107,7 +109,7 @@ func (s *Service) copyResults() *CheckResult {
 func (c *Config) SendResults(results *Results) {
 	results.Interval = c.Interval.Seconds()
 
-	c.Website.SendData(&website.Request{
+	c.website.SendData(&website.Request{
 		Route:      website.SvcRoute,
 		Event:      results.What,
 		LogPayload: true,

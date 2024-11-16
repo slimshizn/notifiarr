@@ -1,8 +1,11 @@
 package filewatch
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
@@ -16,10 +19,15 @@ import (
 	"github.com/nxadm/tail/ratelimiter"
 )
 
-var ErrInvalidRegexp = fmt.Errorf("invalid regexp")
+var (
+	ErrInvalidRegexp = errors.New("invalid regexp")
+	ErrIgnoredLog    = errors.New("the requested path is internally ignored")
+)
 
 const (
-	maxRetries    = 6                                  // how many times to retry watching a file.
+	Errors        = " Errors"
+	Matched       = " Matched"
+	maxRetries    = 12                                 // how many times to retry watching a file.
 	retryInterval = 10 * time.Second                   // how often channels are checked for being closed.
 	specialCase   = 2                                  // We have two special channels in our select cases.
 	burstRate     = 6                                  // burst to this many 'matches' before throttling.
@@ -33,6 +41,7 @@ type cmd struct {
 	awMutex     sync.RWMutex
 	files       []*WatchFile
 	limiter     *ratelimiter.LeakyBucket
+	ignored     []string
 }
 
 // Action contains the exported methods for this package.
@@ -42,13 +51,13 @@ type Action struct {
 
 // WatchFile is the input data needed to watch files.
 type WatchFile struct {
-	Path      string `json:"path" toml:"path" xml:"path" yaml:"path"`
-	Regexp    string `json:"regex" toml:"regex" xml:"regex" yaml:"regex"`
-	Skip      string `json:"skip" toml:"skip" xml:"skip" yaml:"skip"`
-	Poll      bool   `json:"poll" toml:"poll" xml:"poll" yaml:"poll"`
-	Pipe      bool   `json:"pipe" toml:"pipe" xml:"pipe" yaml:"pipe"`
+	Path      string `json:"path"      toml:"path"       xml:"path"       yaml:"path"`
+	Regexp    string `json:"regex"     toml:"regex"      xml:"regex"      yaml:"regex"`
+	Skip      string `json:"skip"      toml:"skip"       xml:"skip"       yaml:"skip"`
+	Poll      bool   `json:"poll"      toml:"poll"       xml:"poll"       yaml:"poll"`
+	Pipe      bool   `json:"pipe"      toml:"pipe"       xml:"pipe"       yaml:"pipe"`
 	MustExist bool   `json:"mustExist" toml:"must_exist" xml:"must_exist" yaml:"mustExist"`
-	LogMatch  bool   `json:"logMatch" toml:"log_match" xml:"log_match" yaml:"logMatch"`
+	LogMatch  bool   `json:"logMatch"  toml:"log_match"  xml:"log_match"  yaml:"logMatch"`
 	re        *regexp.Regexp
 	skip      *regexp.Regexp
 	tail      *tail.Tail
@@ -64,18 +73,58 @@ type Match struct {
 }
 
 // New configures the library.
-func New(config *common.Config, files []*WatchFile) *Action {
+func New(config *common.Config, files []*WatchFile, ignored []string) *Action {
 	return &Action{
 		cmd: &cmd{
 			Config:  config,
 			files:   files,
 			limiter: ratelimiter.NewLeakyBucket(burstRate, requestPer),
+			ignored: checkIgnored(ignored),
 		},
 	}
 }
 
+// We ignore our own log files.
+func (i ignored) isIgnored(filePath string) bool {
+	if abs, err := filepath.Abs(filePath); err == nil {
+		filePath = abs
+	}
+
+	for _, name := range i {
+		if filePath == name {
+			return true
+		}
+	}
+
+	return false
+}
+
+type ignored []string
+
+// We ignore our own log files.
+func checkIgnored(ignored []string) ignored {
+	output := []string{}
+
+	for _, item := range ignored {
+		if item == "" {
+			continue
+		}
+
+		if abs, err := filepath.Abs(item); err == nil {
+			item = abs // err is swallowed
+		}
+
+		output = append(output, item)
+	}
+
+	return output
+}
+
+// Verify the interfaces are satisfied.
+var _ = common.Run(&Action{nil})
+
 // Run compiles any regexp's and opens a tail -f on provided watch files.
-func (a *Action) Run() {
+func (a *Action) Run(_ context.Context) {
 	a.cmd.run()
 }
 
@@ -94,21 +143,23 @@ func (c *cmd) run() {
 	validTails := []*WatchFile{{Path: "/add watcher channel/"}, {Path: "/retry ticker/"}}
 
 	for _, item := range c.files {
-		if err := item.setup(&logger{Logger: c.Config.Logger}); err != nil {
-			c.Errorf("Unable to watch file %v", err)
+		if err := item.setup(&logger{Logger: c.Config.Logger}, c.ignored); err != nil {
+			c.Errorf("Unable to watch file: %v", err)
 			continue
 		}
 
 		validTails = append(validTails, item)
 	}
 
-	if len(validTails) != 0 {
-		cases, ticker := c.collectFileTails(validTails)
-		go c.tailFiles(cases, validTails, ticker)
+	if len(validTails) == 0 {
+		return
 	}
+
+	cases, ticker := c.collectFileTails(validTails)
+	c.tailFiles(cases, validTails, ticker)
 }
 
-func (w *WatchFile) setup(logger *logger) error {
+func (w *WatchFile) setup(logger *logger, ignored ignored) error {
 	var err error
 
 	w.retries = maxRetries // so it will not get "restarted" unless it passes validation.
@@ -119,6 +170,8 @@ func (w *WatchFile) setup(logger *logger) error {
 		return fmt.Errorf("%w: regexp match compile failed, ignored: %s", ErrInvalidRegexp, w.Path)
 	} else if w.skip, err = regexp.Compile(w.Skip); err != nil {
 		return fmt.Errorf("%w: regexp skip compile failed, ignored: %s", ErrInvalidRegexp, w.Path)
+	} else if ignored.isIgnored(w.Path) {
+		return fmt.Errorf("%w: %s", ErrIgnoredLog, w.Path)
 	}
 
 	w.tail, err = tail.TailFile(w.Path, tail.Config{
@@ -132,7 +185,7 @@ func (w *WatchFile) setup(logger *logger) error {
 		Logger:        logger,
 	})
 	if err != nil {
-		mnd.FileWatcher.Add(w.Path+" Errors", 1)
+		mnd.FileWatcher.Add(w.Path+Errors, 1)
 		return fmt.Errorf("watching file %s: %w", w.Path, err)
 	}
 
@@ -143,7 +196,7 @@ func (w *WatchFile) setup(logger *logger) error {
 
 // collectFileTails uses reflection to watch a dynamic list of files in one go routine.
 func (c *cmd) collectFileTails(tails []*WatchFile) ([]reflect.SelectCase, *time.Ticker) {
-	c.addWatcher = make(chan *WatchFile, 1)
+	c.addWatcher = make(chan *WatchFile, len(tails)+1)
 	c.stopWatcher = make(chan struct{})
 	ticker := time.NewTicker(retryInterval)
 	cases := make([]reflect.SelectCase, len(tails))
@@ -163,9 +216,9 @@ func (c *cmd) collectFileTails(tails []*WatchFile) ([]reflect.SelectCase, *time.
 		c.Printf("==> Watching: %s, regexp: '%s' skip: '%s' poll:%v pipe:%v must:%v log:%v",
 			item.Path, item.Regexp, item.Skip, item.Poll, item.Pipe, item.MustExist, item.LogMatch)
 
-		if mnd.FileWatcher.Get(item.Path+" Matched") == nil {
+		if mnd.FileWatcher.Get(item.Path+Matched) == nil {
 			// so it shows up on the Metrics page if no lines have been read.
-			mnd.FileWatcher.Add(item.Path+" Matched", 0)
+			mnd.FileWatcher.Add(item.Path+Matched, 0)
 		}
 	}
 
@@ -199,7 +252,7 @@ func (c *cmd) tailFiles(cases []reflect.SelectCase, tails []*WatchFile, ticker *
 			died = c.fileWatcherTicker(died)
 		case data.IsNil(), data.IsZero(), !data.Elem().CanInterface():
 			c.Errorf("Got non-addressable file watcher data from %s", item.Path)
-			mnd.FileWatcher.Add(item.Path+" Errors", 1)
+			mnd.FileWatcher.Add(item.Path+Errors, 1)
 		case idx == 0:
 			item, _ = data.Elem().Addr().Interface().(*WatchFile)
 			tails = append(tails, item)
@@ -220,7 +273,7 @@ func (c *cmd) tailFiles(cases []reflect.SelectCase, tails []*WatchFile, ticker *
 func (c *cmd) killWatcher(item *WatchFile) bool {
 	if err := item.deactivate(); err != nil {
 		c.Errorf("No longer watching file (channel closed): %s: %v", item.Path, err)
-		mnd.FileWatcher.Add(item.Path+" Errors", 1)
+		mnd.FileWatcher.Add(item.Path+Errors, 1)
 
 		return true
 	}
@@ -244,20 +297,23 @@ func (c *cmd) fileWatcherTicker(died bool) bool {
 		}
 
 		item.retries++
+		retries := item.retries
 		mnd.FileWatcher.Add(item.Path+" Retries", 1)
 
 		// move this back to debug.
-		c.Printf("Restarting File Watcher (retries: %d): %s", item.retries, item.Path)
+		c.Printf("Restarting File Watcher (retries: %d/%d): %s", item.retries, maxRetries, item.Path)
 
 		if err := c.addFileWatcher(item); err != nil {
-			c.Errorf("Restarting File Watcher (retries: %d): %s: %v", item.retries, item.Path, err)
-			mnd.FileWatcher.Add(item.Path+" Errors", 1)
+			c.Errorf("Restarting File Watcher (retries: %d/%d): %s: %v", item.retries, maxRetries, item.Path, err)
+			mnd.FileWatcher.Add(item.Path+Errors, 1)
 
 			stilldead = true
 		} else {
-			item.retries = 0
 			mnd.FileWatcher.Add(item.Path+" Restarts", 1)
 		}
+
+		// Calling addFileWatcher will reset the retries to 0, so undo that.
+		item.retries = retries
 	}
 
 	return stilldead
@@ -266,6 +322,8 @@ func (c *cmd) fileWatcherTicker(died bool) bool {
 // checkLineMatch runs when a watched file has a new line written.
 // If a match is found a notification is sent.
 func (c *cmd) checkLineMatch(line *tail.Line, tail *WatchFile) {
+	tail.retries = 0 // reset retries once we get a line from the file.
+
 	if tail.re == nil || line.Text == "" || !tail.re.MatchString(line.Text) {
 		return // no match
 	}
@@ -275,7 +333,7 @@ func (c *cmd) checkLineMatch(line *tail.Line, tail *WatchFile) {
 		return // skip matches
 	}
 
-	mnd.FileWatcher.Add(tail.Path+" Matched", 1)
+	mnd.FileWatcher.Add(tail.Path+Matched, 1)
 
 	match := &Match{
 		File:    tail.Path,
@@ -309,7 +367,8 @@ func (c *cmd) addFileWatcher(file *WatchFile) error {
 		return common.ErrNoChannel
 	}
 
-	if err := file.setup(&logger{Logger: c.Config.Logger}); err != nil {
+	err := file.setup(&logger{Logger: c.Config.Logger}, c.ignored)
+	if err != nil {
 		return err
 	}
 
@@ -328,11 +387,7 @@ func (w *WatchFile) Stop() error {
 
 	w.retries = maxRetries // so it will not get "restarted" after manually being stopped.
 
-	if err := w.stop(); err != nil {
-		return err
-	}
-
-	return nil
+	return w.stop()
 }
 
 func (c *cmd) stop() {

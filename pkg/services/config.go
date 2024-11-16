@@ -1,7 +1,10 @@
 package services
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"html"
 	"sync"
 	"time"
 
@@ -26,22 +29,22 @@ const (
 
 // Errors returned by this Services package.
 var (
-	ErrNoName      = fmt.Errorf("service check is missing a unique name")
-	ErrNoCheck     = fmt.Errorf("service check is missing a check value")
+	ErrNoName      = errors.New("service check is missing a unique name")
+	ErrNoCheck     = errors.New("service check is missing a check value")
 	ErrInvalidType = fmt.Errorf("service check type must be one of %s, %s, %s, %s, %s",
 		CheckTCP, CheckHTTP, CheckPROC, CheckPING, CheckICMP)
-	ErrBadTCP = fmt.Errorf("tcp checks must have an ip:port or host:port combo; the :port is required")
+	ErrBadTCP = errors.New("tcp checks must have an ip:port or host:port combo; the :port is required")
 )
 
 // Config for this Services plugin comes from a config file.
 type Config struct {
-	Interval    cnfg.Duration     `toml:"interval" xml:"interval" json:"interval"`
-	Parallel    uint              `toml:"parallel" xml:"parallel" json:"parallel"`
-	Disabled    bool              `toml:"disabled" xml:"disabled" json:"disabled"`
-	LogFile     string            `toml:"log_file" xml:"log_file" json:"logFile"`
-	Apps        *apps.Apps        `toml:"-" json:"-"`
-	Website     *website.Server   `toml:"-" json:"-"`
-	Plugins     *snapshot.Plugins `toml:"-" json:"-"`
+	Interval    cnfg.Duration     `json:"interval" toml:"interval" xml:"interval"`
+	Parallel    uint              `json:"parallel" toml:"parallel" xml:"parallel"`
+	Disabled    bool              `json:"disabled" toml:"disabled" xml:"disabled"`
+	LogFile     string            `json:"logFile"  toml:"log_file" xml:"log_file"`
+	Apps        *apps.Apps        `json:"-"        toml:"-"`
+	website     *website.Server   `json:"-"        toml:"-"`
+	Plugins     *snapshot.Plugins `json:"-"        toml:"-"` // pass this in so we can service-check mysql
 	mnd.Logger  `json:"-"`        // log file writer
 	services    map[string]*Service
 	checks      chan *Service
@@ -85,32 +88,34 @@ type Results struct {
 
 // CheckResult represents the status of a service.
 type CheckResult struct {
-	Name        string        `json:"name"`   // "Radarr"
-	State       CheckState    `json:"state"`  // 0 = OK, 1 = Warn, 2 = Crit, 3 = Unknown
-	Output      string        `json:"output"` // metadata message
-	Type        CheckType     `json:"type"`   // http, tcp, ping
-	Time        time.Time     `json:"time"`   // when it was checked, rounded to Microseconds
-	Since       time.Time     `json:"since"`  // how long it has been in this state, rounded to Microseconds
-	Interval    float64       `json:"interval"`
-	Check       string        `json:"-"`
-	Expect      string        `json:"-"`
-	IntervalDur time.Duration `json:"-"`
+	Name        string         `json:"name"`     // "Radarr"
+	State       CheckState     `json:"state"`    // 0 = OK, 1 = Warn, 2 = Crit, 3 = Unknown
+	Output      *Output        `json:"output"`   // metadata message must never be nil.
+	Type        CheckType      `json:"type"`     // http, tcp, ping
+	Time        time.Time      `json:"time"`     // when it was checked, rounded to Microseconds
+	Since       time.Time      `json:"since"`    // how long it has been in this state, rounded to Microseconds
+	Interval    float64        `json:"interval"` // interval in seconds
+	Metadata    map[string]any `json:"metadata"` // arbitrary info about the service or result.
+	Check       string         `json:"-"`
+	Expect      string         `json:"-"`
+	IntervalDur time.Duration  `json:"-"`
 }
 
 // Service is a thing we check and report results for.
 type Service struct {
-	Name     string        `toml:"name" xml:"name" json:"name"`             // Radarr
-	Type     CheckType     `toml:"type" xml:"type" json:"type"`             // http
-	Value    string        `toml:"check" xml:"check" json:"value"`          // http://some.url
-	Expect   string        `toml:"expect" xml:"expect" json:"expect"`       // 200
-	Timeout  cnfg.Duration `toml:"timeout" xml:"timeout" json:"timeout"`    // 10s
-	Interval cnfg.Duration `toml:"interval" xml:"interval" json:"interval"` // 1m
-	validSSL bool          // can be set for https checks.
+	Name     string         `json:"name"     toml:"name"     xml:"name"`     // Radarr
+	Type     CheckType      `json:"type"     toml:"type"     xml:"type"`     // http
+	Value    string         `json:"value"    toml:"check"    xml:"check"`    // http://some.url
+	Expect   string         `json:"expect"   toml:"expect"   xml:"expect"`   // 200
+	Timeout  cnfg.Duration  `json:"timeout"  toml:"timeout"  xml:"timeout"`  // 10s
+	Interval cnfg.Duration  `json:"interval" toml:"interval" xml:"interval"` // 1m
+	Tags     map[string]any `json:"tags"     toml:"tags"     xml:"tags"`     // copied to Metadata.
+	validSSL bool           // can be set for https checks.
 	svc      service
 }
 
 type service struct {
-	Output       string     `json:"output"`
+	Output       *Output    `json:"output"`
 	State        CheckState `json:"state"`
 	Since        time.Time  `json:"since"`
 	LastCheck    time.Time  `json:"lastCheck"`
@@ -118,4 +123,28 @@ type service struct {
 	proc         *procExpect // only used for process checks.
 	ping         *pingExpect // only used for icmp/udp ping checks.
 	sync.RWMutex `json:"-"`
+}
+
+type Output struct {
+	str string // output string
+	esc bool   // html escaped?
+}
+
+func (o *Output) String() string {
+	switch {
+	case o == nil:
+		return ""
+	case o.esc:
+		return html.UnescapeString(o.str)
+	default:
+		return o.str
+	}
+}
+
+func (o *Output) MarshalJSON() ([]byte, error) {
+	return json.Marshal(o.str) //nolint:wrapcheck // do not unescape it.
+}
+
+func (o *Output) UnmarshalJSON(input []byte) error {
+	return json.Unmarshal(input, &o.str) //nolint:wrapcheck
 }

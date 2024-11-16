@@ -13,7 +13,7 @@ const (
 
 func today(when time.Time) int {
 	switch today := when.YearDay(); {
-	case !leapYear(when.Year()), today < leapDay:
+	case !isLeapYear(when.Year()), today < leapDay:
 		return today
 	case today == leapDay:
 		return altLeapDay
@@ -22,7 +22,7 @@ func today(when time.Time) int {
 	}
 }
 
-func leapYear(year int) bool {
+func isLeapYear(year int) bool {
 	return year%400 == 0 || (year%4 == 0 && year%100 != 0)
 }
 
@@ -45,7 +45,7 @@ func emojiMonth(when time.Time) string {
 
 // TodaysEmoji returns an emoji specific to the month (or perhaps date).
 func TodaysEmoji() string {
-	if emoji, ok := map[int]string{
+	if emoji, exists := map[int]string{
 		1:          "🎉", // January 1
 		45:         "💝", // February 14
 		185:        "🧨", // July 4
@@ -56,7 +56,7 @@ func TodaysEmoji() string {
 		328:        "🦃", // November 24
 		359:        "🎄", // December 25
 		altLeapDay: "🤹", // February 29 (Leap Day)
-	}[today(version.Started)]; ok {
+	}[today(version.Started)]; exists {
 		return emoji
 	}
 

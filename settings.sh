@@ -1,56 +1,32 @@
-# Application Builder Configuration File. Customized for: hello-world
-# Each line must have an export clause.
-# This file is parsed and sourced by the Makefile, Docker and Homebrew builds.
-# Powered by Application Builder: https://github.com/golift/application-builder
-
-# Bring in dynamic repo/pull/source info.
-source $(dirname "${BASH_SOURCE[0]}")/init/buildinfo.sh
-
-# Must match the repo name to make things easy. Otherwise, fix some other paths.
-BINARY="notifiarr"
-# github username / repo name
-REPO="Notifiarr/notifiarr"
-# Github repo containing homebrew formula repo.
-HBREPO="golift/homebrew-mugs"
-AUREPO="golift/aur"
 MAINT="David Newhall II <captain at golift dot io>"
-DESC="Unified Client for Notifiarr.com"
-# Example must exist at examples/$CONFIG_FILE.example
-CONFIG_FILE="notifiarr.conf"
+DESC="Official Client for Notifiarr.com"
 LICENSE="MIT"
-# FORMULA is either 'service' or 'tool'. Services run as a daemon, tools do not.
-# This affects the homebrew formula (launchd) and linux packages (systemd).
-FORMULA="service"
-
 # Used for source links in package metadata and docker labels.
-SOURCE_URL="https://github.com/${REPO}"
+SOURCE_URL="https://github.com/Notifiarr/notifiarr"
+VENDOR="Go Lift <code@golift.io>"
+export MAINT DESC LICENSE SOURCE_URL VENDOR
 
-# This parameter is passed in as -X to go build. Used to override the Version variable in a package.
-# This makes a path like golift.io/version.Version=1.3.3
-# Name the Version-containing library the same as the github repo, without dashes.
-VERSION_PATH="golift.io/version"
-
-# Used by homebrew and arch linux downloads.
-SOURCE_PATH=https://codeload.github.com/${REPO}/tar.gz/refs/tags/v${VERSION}
-
-export BINARY HBREPO MAINT VENDOR DESC CONFIG_FILE
-export LICENSE FORMULA SOURCE_URL VERSION_PATH SOURCE_PATH
+DATE="$(date -u +%Y-%m-%dT%H:%M:00Z)"
+VERSION=$(git describe --abbrev=0 --tags $(git rev-list --tags --max-count=1 2>/dev/null) 2>/dev/null | tr -d v)
+[ "$VERSION" != "" ] || VERSION=development
+# This produces a 0 in some environments (like Homebrew), but it's only used for packages.
+ITERATION=$(git rev-list --count --all 2>/dev/null || echo 0)
+COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo 0)"
+GIT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+BRANCH="${GIT_BRANCH:-${GITHUB_REF_NAME}}"
+export DATE VERSION ITERATION COMMIT BRANCH
 
 ### Optional ###
 
 # Import this signing key only if it's in the keyring.
-gpg --list-keys 2>/dev/null | grep -q B93DD66EF98E54E2EAE025BA0166AD34ABC5A57C
-[ "$?" != "0" ] || export SIGNING_KEY=B93DD66EF98E54E2EAE025BA0166AD34ABC5A57C
-
-export WINDOWS_LDFLAGS=""
-export MACAPP="Notifiarr"
-export EXTRA_FPM_FLAGS="--conflicts=discordnotifier-client>0.0.1 --provides=notifiarr --provides=discordnotifier-client"
-export BUILD_FLAGS="-tags osusergo,netgo ${BUILD_FLAGS}"
+if gpg --list-keys 2>/dev/null | grep -q B93DD66EF98E54E2EAE025BA0166AD34ABC5A57C; then
+    export SIGNING_KEY=B93DD66EF98E54E2EAE025BA0166AD34ABC5A57C
+fi
 
 # Make sure Docker builds work locally.
 # These do not affect automated builds, just allow the docker build scripts to run from a local clone.
 [ -n "$SOURCE_BRANCH" ] || export SOURCE_BRANCH=$BRANCH
 [ -n "$DOCKER_TAG" ] || export DOCKER_TAG=$(echo $SOURCE_BRANCH | sed 's/^v*\([0-9].*\)/\1/')
-[ -n "$DOCKER_REPO" ] || export DOCKER_REPO="golift/${BINARY}"
+[ -n "$DOCKER_REPO" ] || export DOCKER_REPO="golift/notifiarr"
 [ -n "$IMAGE_NAME" ] || export IMAGE_NAME="${DOCKER_REPO}:${DOCKER_TAG}"
-[ -n "$DOCKERFILE_PATH" ] || export DOCKERFILE_PATH="init/docker/Dockerfile"
+[ -n "$DOCKERFILE_PATH" ] || export DOCKERFILE_PATH="init/docker/Dockerfile.scratch"

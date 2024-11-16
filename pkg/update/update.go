@@ -10,9 +10,9 @@ import (
 	"compress/bzip2"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -24,40 +24,39 @@ import (
 	"github.com/Notifiarr/notifiarr/pkg/mnd"
 )
 
-// SleepTime is how long we wait after updating before exiting.
-const SleepTime = 5 * time.Second
-
 const (
-	downloadTimeout = 5 * time.Minute
+	downloadTimeout  = 5 * time.Minute
+	backupTimeFormat = "060102T150405"
+	dotExe           = ".exe"
 )
 
 // Command is the input data to perform an in-place update.
 type Command struct {
-	URL         string   // file to download.
-	Path        string   // file to be updated.
-	Args        []string // optional, but non-nil will crash.
-	*log.Logger          // debug logs.
-}
-
-// Restart is meant to be called from a special flag that reloads the app after an upgrade.
-func Restart(u *Command) error {
-	fmt.Printf("Sleeping %v before restarting.", SleepTime) //nolint:forbidigo
-	time.Sleep(SleepTime)
-
-	if err := exec.Command(u.Path, u.Args...).Start(); err != nil { //nolint:gosec
-		return fmt.Errorf("executing command %w", err)
-	}
-
-	time.Sleep(time.Second)
-
-	return nil
+	URL        string   // file to download.
+	Path       string   // file to be updated.
+	Args       []string // optional, but non-nil will crash.
+	mnd.Logger          // debug logs.
 }
 
 // Errors. Don't trigger these.
 var (
-	ErrInvalidURL = fmt.Errorf("invalid URL provided")
-	ErrNoPath     = fmt.Errorf("a path to the file being replaced must be provided")
+	ErrInvalidURL = errors.New("invalid URL provided")
+	ErrNoPath     = errors.New("a path to the file being replaced must be provided")
 )
+
+// Restart is meant to be called from a special flag that reloads the app after an upgrade.
+func Restart(cmd *Command) error {
+	// A small pause to give the parent time to exit.
+	time.Sleep(time.Second)
+	// A small pause to give the new app time to fork.
+	defer time.Sleep(time.Second)
+
+	if err := exec.Command(cmd.Path, cmd.Args...).Start(); err != nil { //nolint:gosec
+		return fmt.Errorf("executing command %w", err)
+	}
+
+	return nil
+}
 
 // Now downloads the new file to a temp name in the same folder as the running file.
 // Moves the running file to a backup name in the same folder.
@@ -65,11 +64,11 @@ var (
 // Triggers another invocation of the app that sleeps 5 seconds then restarts.
 // The running app must exit after this returns!
 // The restart command can trigger the above Restart() procedure.
-// And that prcoedure relaunches the app; this allows "in-place" upgrades.
+// And that procedure relaunches the app; this allows "in-place" upgrades.
 // This also makes sure the new file works before this app exits.
 // This is not required though, and you can totally upgrade "a different app".
-func Now(u *Command) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), downloadTimeout)
+func Now(ctx context.Context, u *Command) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, downloadTimeout)
 	defer cancel()
 
 	return NowWithContext(ctx, u)
@@ -90,10 +89,10 @@ func NowWithContext(ctx context.Context, update *Command) (string, error) {
 		return backupFile, err
 	}
 
-	update.Printf("[Update] Triggering Restart: %s %s", update.Path, strings.Join(update.Args, " "))
+	update.Printf("[UPDATE] Triggering Restart: %s %s", update.Path, strings.Join(update.Args, " "))
 
 	if err := exec.Command(update.Path, update.Args...).Start(); err != nil { //nolint:gosec
-		return backupFile, fmt.Errorf("executing restart command %w", err)
+		return backupFile, fmt.Errorf("executing restart command: %w", err)
 	}
 
 	return backupFile, nil
@@ -115,30 +114,26 @@ func (u *Command) replaceFile(ctx context.Context) (string, error) {
 	}
 
 	suff := ""
-	if strings.HasSuffix(u.Path, ".exe") {
-		suff = ".exe"
+	if strings.HasSuffix(u.Path, dotExe) {
+		suff = dotExe
 	}
 
-	backupFile := strings.TrimSuffix(u.Path, ".exe")
-	backupFile += ".backup." + time.Now().Format("060102T150405") + suff
-	u.Printf("[Update] Renaming %s => %s", u.Path, backupFile)
+	backupFile := strings.TrimSuffix(u.Path, dotExe)
+	backupFile += ".backup." + time.Now().Format(backupTimeFormat) + suff
+	u.Debugf("[UPDATE] Renaming %s => %s", u.Path, backupFile)
 
 	if err := os.Rename(u.Path, backupFile); err != nil {
 		return backupFile, fmt.Errorf("renaming original file: %w", err)
 	}
 
-	u.Printf("[Update] Renaming %s => %s", tempFile, u.Path)
+	u.Debugf("[UPDATE] Renaming %s => %s", tempFile, u.Path)
+
+	u.cleanOldBackups()
 
 	if err := os.Rename(tempFile, u.Path); err != nil {
 		return backupFile, fmt.Errorf("renaming downloaded file: %w", err)
 	}
-	/* // Hack used for testing.
-	u.Printf("[Update] Renaming [HACK] %s => %s", backupFile, u.Path)
 
-	if err := os.Rename(backupFile, u.Path); err != nil {
-		return backupFile, fmt.Errorf("renaming downloaded file %w", err)
-	}
-	/**/
 	return backupFile, nil
 }
 
@@ -149,7 +144,7 @@ func (u *Command) writeFile(ctx context.Context, folderPath string) (string, err
 	}
 	defer tempFile.Close()
 
-	u.Printf("[Update] Primed Temp File: %s", tempFile.Name())
+	u.Debugf("[UPDATE] Primed Temp File: %s", tempFile.Name())
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.URL, nil)
 	if err != nil {
@@ -167,17 +162,17 @@ func (u *Command) writeFile(ctx context.Context, folderPath string) (string, err
 
 func (u *Command) decompressFile(tempFile *os.File, resp io.Reader, size int64) error {
 	switch {
-	case strings.HasSuffix(u.URL, ".zip"):
+	case strings.Contains(u.URL, ".zip?stamp"), strings.HasSuffix(u.URL, ".zip"):
 		if body, err := io.ReadAll(resp); err != nil {
 			return fmt.Errorf("reading file from URL: %w", err)
 		} else if err := u.writeZipFile(tempFile, body, size); err != nil {
 			return err
 		}
-	case strings.HasSuffix(u.URL, ".gz"):
+	case strings.Contains(u.URL, ".gz?stamp"), strings.HasSuffix(u.URL, ".gz"):
 		if err := u.writeGZipFile(tempFile, resp); err != nil {
 			return err
 		}
-	case strings.HasSuffix(u.URL, ".bz2"):
+	case strings.Contains(u.URL, ".bz2?stamp"), strings.HasSuffix(u.URL, ".bz2"):
 		if _, err := io.Copy(tempFile, bzip2.NewReader(resp)); err != nil {
 			return fmt.Errorf("bzunzipping temporary file: %w", err)
 		}
@@ -217,7 +212,7 @@ func (u *Command) writeZipFile(tempFile *os.File, body []byte, size int64) error
 
 	// Find the exe file and write that.
 	for _, zipFile := range zipReader.File {
-		if runtime.GOOS == mnd.Windows && strings.HasSuffix(zipFile.Name, ".exe") {
+		if runtime.GOOS == mnd.Windows && strings.HasSuffix(zipFile.Name, dotExe) {
 			zipOpen, err := zipFile.Open()
 			if err != nil {
 				return fmt.Errorf("reading zipped exe file: %w", err)
@@ -232,7 +227,7 @@ func (u *Command) writeZipFile(tempFile *os.File, body []byte, size int64) error
 		}
 	}
 
-	u.Println("[Update] exe file not found in zip file")
+	u.Errorf("[UPDATE] exe file not found in zip file")
 
 	return nil
 }

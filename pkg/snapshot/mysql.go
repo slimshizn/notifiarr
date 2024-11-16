@@ -16,13 +16,13 @@ import (
 
 // MySQLConfig allows us to gather a process list for the snapshot.
 type MySQLConfig struct {
-	Name    string        `toml:"name" xml:"name"`
-	Host    string        `toml:"host" xml:"host"`
-	User    string        `toml:"user" xml:"user"`
-	Pass    string        `toml:"pass" xml:"pass"`
-	Timeout cnfg.Duration `toml:"timeout" xml:"timeout"`
-	// only used by service checks, snapshot interval is used for mysql.
-	Interval cnfg.Duration `toml:"interval" xml:"interval"`
+	Name    string        `json:"name"    toml:"name"    xml:"name"`
+	Host    string        `json:"host"    toml:"host"    xml:"host"`
+	User    string        `json:"-"       toml:"user"    xml:"user"`
+	Pass    string        `json:"-"       toml:"pass"    xml:"pass"`
+	Timeout cnfg.Duration `json:"timeout" toml:"timeout" xml:"timeout"`
+	// Only used by service checks, snapshot interval is used for mysql.
+	Interval cnfg.Duration `json:"interval" toml:"interval" xml:"interval"`
 }
 
 // MySQLProcesses allows us to manipulate our list with methods.
@@ -30,14 +30,15 @@ type MySQLProcesses []*MySQLProcess
 
 // MySQLProcess represents the data returned from SHOW PROCESS LIST.
 type MySQLProcess struct {
-	ID    int64      `json:"id"`
-	User  string     `json:"user"`
-	Host  string     `json:"host"`
-	DB    NullString `json:"db"`
-	Cmd   string     `json:"command"`
-	Time  int64      `json:"time"`
-	State string     `json:"state"`
-	Info  NullString `json:"info"`
+	ID       int64      `json:"id"`
+	User     string     `json:"user"`
+	Host     string     `json:"host"`
+	DB       NullString `json:"db"`
+	Cmd      string     `json:"command"`
+	Time     int64      `json:"time"`
+	State    string     `json:"state"`
+	Info     NullString `json:"info"`
+	Progress float64    `json:"progress"` // mariadb
 }
 
 type NullString struct {
@@ -62,8 +63,10 @@ func (n NullString) MarshalJSON() ([]byte, error) {
 }
 
 // GetMySQL grabs the process list from a bunch of servers.
-func (s *Snapshot) GetMySQL(ctx context.Context, servers []*MySQLConfig, limit int) (errs []error) {
+func (s *Snapshot) GetMySQL(ctx context.Context, servers []*MySQLConfig, limit int) []error {
 	s.MySQL = make(map[string]*MySQLServerData)
+
+	var errs []error
 
 	for _, server := range servers {
 		if server.Host == "" {
@@ -127,18 +130,29 @@ func scanMySQLProcessList(ctx context.Context, dbase *sql.DB) (MySQLProcesses, e
 	if err != nil {
 		mnd.Apps.Add("MySQL&&Errors", 1)
 		return nil, fmt.Errorf("getting processes: %w", err)
-	} else if err = rows.Err(); err != nil {
-		mnd.Apps.Add("MySQL&&Errors", 1)
-		return nil, fmt.Errorf("getting processes rows: %w", err)
 	}
 	defer rows.Close()
 
+	if err = rows.Err(); err != nil {
+		mnd.Apps.Add("MySQL&&Errors", 1)
+		return nil, fmt.Errorf("getting processes rows: %w", err)
+	}
+
 	var list MySQLProcesses
+
+	const mysqlColCount = 8
 
 	for rows.Next() {
 		var pid MySQLProcess
-		// for each row, scan the result into our tag composite object
-		err := rows.Scan(&pid.ID, &pid.User, &pid.Host, &pid.DB, &pid.Cmd, &pid.Time, &pid.State, &pid.Info)
+		// for each row, scan the result into our tag composite object.
+		if cols, _ := rows.Columns(); len(cols) == mysqlColCount {
+			// mysql only has 8 columns
+			err = rows.Scan(&pid.ID, &pid.User, &pid.Host, &pid.DB, &pid.Cmd, &pid.Time, &pid.State, &pid.Info)
+		} else {
+			// mariadb returns 9 columns (adds progress).
+			err = rows.Scan(&pid.ID, &pid.User, &pid.Host, &pid.DB, &pid.Cmd, &pid.Time, &pid.State, &pid.Info, &pid.Progress)
+		}
+
 		if err != nil {
 			mnd.Apps.Add("MySQL&&Errors", 1)
 			return nil, fmt.Errorf("scanning process rows: %w", err)
@@ -155,58 +169,64 @@ func scanMySQLProcessList(ctx context.Context, dbase *sql.DB) (MySQLProcesses, e
 }
 
 func scanMySQLStatus(ctx context.Context, dbase *sql.DB) (MySQLStatus, error) {
-	var (
-		list  = make(MySQLStatus)
-		likes = []string{
-			"Aborted",
-			"Bytes",
-			"Connection",
-			"Created",
-			"Handler",
-			"Innodb",
-			"Key",
-			"Open",
-			"Q",
-			"Slow",
-			"Sort",
-			"Uptime",
-			"Table",
-			"Threads",
+	list := make(MySQLStatus)
+
+	for _, name := range []string{
+		"Aborted",
+		"Bytes",
+		"Connection",
+		"Created",
+		"Handler",
+		"Innodb",
+		"Key",
+		"Open",
+		"Q",
+		"Slow",
+		"Sort",
+		"Uptime",
+		"Table",
+		"Threads",
+	} {
+		if err := list.processStatus(ctx, dbase, name); err != nil {
+			return nil, err
 		}
-	)
-
-	for _, name := range likes {
-		mnd.Apps.Add("MySQL&&Global Status Queries", 1)
-
-		rows, err := dbase.QueryContext(ctx, "SHOW GLOBAL STATUS LIKE '"+name+"%'") //nolint:execinquery
-		if err != nil {
-			mnd.Apps.Add("MySQL&&Errors", 1)
-			return nil, fmt.Errorf("getting global status: %w", err)
-		} else if err = rows.Err(); err != nil {
-			mnd.Apps.Add("MySQL&&Errors", 1)
-			return nil, fmt.Errorf("getting global status rows: %w", err)
-		}
-
-		for rows.Next() {
-			var vname, value string
-
-			if err := rows.Scan(&vname, &value); err != nil {
-				mnd.Apps.Add("MySQL&&Errors", 1)
-				return nil, fmt.Errorf("scanning global status rows: %w", err)
-			}
-
-			v, err := strconv.ParseFloat(value, mnd.Bits64)
-			if err != nil || v == 0 {
-				continue
-			}
-
-			list[vname] = v
-		}
-
-		rows.Close()
 	}
 
 	return list, nil
+}
+
+func (m MySQLStatus) processStatus(ctx context.Context, dbase *sql.DB, name string) error {
+	mnd.Apps.Add("MySQL&&Global Status Queries", 1)
+
+	rows, err := dbase.QueryContext(ctx, "SHOW GLOBAL STATUS LIKE '"+name+"%'")
+	if err != nil {
+		mnd.Apps.Add("MySQL&&Errors", 1)
+		return fmt.Errorf("getting global status: %w", err)
+	}
+	defer rows.Close()
+
+	if err = rows.Err(); err != nil {
+		mnd.Apps.Add("MySQL&&Errors", 1)
+		return fmt.Errorf("getting global status rows: %w", err)
+	}
+
+	for rows.Next() {
+		var vname, value string
+
+		if err := rows.Scan(&vname, &value); err != nil {
+			mnd.Apps.Add("MySQL&&Errors", 1)
+			return fmt.Errorf("scanning global status rows: %w", err)
+		}
+
+		v, err := strconv.ParseFloat(value, mnd.Bits64)
+		if err != nil || v == 0 {
+			continue
+		}
+
+		m[vname] = v
+	}
+
+	return nil
 }
 
 // Len allows us to sort MySQLProcesses.

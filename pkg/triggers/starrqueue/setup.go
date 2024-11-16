@@ -4,6 +4,8 @@ import (
 	"time"
 
 	"github.com/Notifiarr/notifiarr/pkg/triggers/common"
+	"github.com/Notifiarr/notifiarr/pkg/website/clientinfo"
+	"golift.io/cnfg"
 )
 
 /* This file contains the procedures to send stuck download queue items to notifiarr. */
@@ -25,7 +27,7 @@ const (
 	// How often to check starr apps for queue list when finished items is enabled.
 	finishedDuration = time.Minute
 	// This is the max number of queued items to inspect/send.
-	queueItemsMax = 100
+	queueItemsMax = 1000
 )
 
 const (
@@ -67,23 +69,27 @@ func (a *Action) Create() {
 			Name: TrigStuckItems,
 			Fn:   a.cmd.sendStuckQueues,
 			C:    make(chan *common.ActionInput, 1),
-			T:    time.NewTicker(stuckDuration),
+			D:    cnfg.Duration{Duration: stuckDuration},
 		})
 
-		a.cmd.Add(&common.Action{
-			Hide: true,
-			Name: TrigDownloadingItems,
-			Fn:   a.cmd.sendDownloadingQueues,
-			C:    make(chan *common.ActionInput, 1),
-			T:    time.NewTicker(finishedDuration),
-		})
+		// Only enable this timer if the user is a patron.
+		if ci := clientinfo.Get(); ci != nil && ci.IsPatron() {
+			a.cmd.Add(&common.Action{
+				Hide: true,
+				Name: TrigDownloadingItems,
+				Fn:   a.cmd.sendDownloadingQueues,
+				C:    make(chan *common.ActionInput, 1),
+				D:    cnfg.Duration{Duration: finishedDuration},
+			})
+		}
 	}
 }
 
 // listItem is data formatted for sending a json payload to the website.
 type listItem struct {
-	Name  string        `json:"name"`
-	Queue []interface{} `json:"queue"`
+	Name  string      `json:"name"`
+	Queue interface{} `json:"queue"`
+	Total int         `json:"total"`
 }
 
 // itemList stores an instance->queue map.
@@ -93,7 +99,7 @@ func (i itemList) Len() int {
 	count := 0
 
 	for _, v := range i {
-		count += len(v.Queue)
+		count += v.Total
 	}
 
 	return count

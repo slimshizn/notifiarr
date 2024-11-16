@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"path"
 )
 
 // LibrarySection is data about a library's section, ie movies, tv, music.
 type LibrarySection struct {
+	TrashSize        int    `json:"trashSize,omitempty"` // added later, not part of payload.
 	AllowSync        bool   `json:"allowSync"`
 	Art              string `json:"art"`
 	Composite        string `json:"composite"`
@@ -193,15 +196,15 @@ func (s *Server) GetPlexSectionKeyWithContext(ctx context.Context, keyPath strin
 		return nil, err
 	}
 
-	var v struct {
+	var output struct {
 		MediaContainer *MediaSection `json:"MediaContainer"`
 	}
 
-	if err := json.Unmarshal(data, &v); err != nil {
+	if err := json.Unmarshal(data, &output); err != nil {
 		return nil, fmt.Errorf("parsing library section from %s: %w; failed payload: %s", url, err, string(data))
 	}
 
-	return v.MediaContainer, nil
+	return output.MediaContainer, nil
 }
 
 // GetDirectory returns data about all the library sections.
@@ -218,13 +221,36 @@ func (s *Server) GetDirectoryWithContext(ctx context.Context) (*SectionDirectory
 		return nil, err
 	}
 
-	var v struct {
+	var output struct {
 		MediaContainer *SectionDirectory `json:"MediaContainer"`
 	}
 
-	if err := json.Unmarshal(data, &v); err != nil {
+	if err := json.Unmarshal(data, &output); err != nil {
 		return nil, fmt.Errorf("unmarshaling directory from %s: %w; failed payload: %s", url, err, string(data))
 	}
 
-	return v.MediaContainer, nil
+	return output.MediaContainer, nil
+}
+
+// GetDirectoryWithContext returns data about all the library sections.
+func (s *Server) GetDirectoryTrashSizeWithContext(ctx context.Context, key string) (int, error) {
+	uri := s.config.URL + path.Join("/library", "sections", key, "all")
+	params := make(url.Values)
+	params.Set("trash", "1")
+	params.Set("episode.trash", "1")
+
+	data, err := s.getPlexURL(ctx, uri, params)
+	if err != nil {
+		return 0, err
+	}
+
+	var output struct {
+		MediaContainer *SectionDirectory `json:"MediaContainer"`
+	}
+
+	if err := json.Unmarshal(data, &output); err != nil {
+		return 0, fmt.Errorf("unmarshaling trash directory from %s: %w; failed payload: %s", uri, err, string(data))
+	}
+
+	return output.MediaContainer.Size, nil
 }

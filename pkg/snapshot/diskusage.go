@@ -4,11 +4,12 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/Notifiarr/notifiarr/pkg/mnd"
-	"github.com/shirou/gopsutil/v3/disk"
+	"github.com/shirou/gopsutil/v4/disk"
 )
 
 func (s *Snapshot) getDisksUsage(ctx context.Context, run bool, allDrives bool) []error { //nolint:cyclop
@@ -16,16 +17,17 @@ func (s *Snapshot) getDisksUsage(ctx context.Context, run bool, allDrives bool) 
 		return nil
 	}
 
-	getAllDisks := allDrives || mnd.IsDocker
+	var (
+		errs        []error
+		getAllDisks = allDrives || mnd.IsDocker
+	)
 
 	partitions, err := disk.PartitionsWithContext(ctx, getAllDisks)
 	if err != nil {
-		return []error{fmt.Errorf("unable to get partitions: %w", err)}
+		errs = append(errs, fmt.Errorf("unable to get partitions: %w", err))
 	}
 
 	s.DiskUsage = make(map[string]*Partition)
-
-	var errs []error
 
 	for idx := range partitions {
 		usage, err := disk.UsageWithContext(ctx, partitions[idx].Mountpoint)
@@ -34,8 +36,17 @@ func (s *Snapshot) getDisksUsage(ctx context.Context, run bool, allDrives bool) 
 			continue
 		}
 
+		// skip tmpfs volumes
+		if usage.Fstype == "tmpfs" ||
+			// skip read only volumes with no device.
+			(slices.Contains(partitions[idx].Opts, "ro") && slices.Contains(partitions[idx].Opts, "nodev")) ||
+			// skip hidden volumes on macos.
+			(mnd.IsDarwin && slices.Contains(partitions[idx].Opts, "nobrowse")) {
+			continue
+		}
+
 		if usage.Total == 0 ||
-			((runtime.GOOS == "darwin" || strings.HasSuffix(runtime.GOOS, "bsd")) &&
+			((mnd.IsDarwin || strings.HasSuffix(runtime.GOOS, "bsd")) &&
 				!strings.HasPrefix(partitions[idx].Device, "/dev/")) {
 			continue
 		}
@@ -45,10 +56,13 @@ func (s *Snapshot) getDisksUsage(ctx context.Context, run bool, allDrives bool) 
 		}
 
 		s.DiskUsage[partitions[idx].Device] = &Partition{
-			Device: partitions[idx].Mountpoint,
-			Total:  usage.Total,
-			Free:   usage.Free,
-			Used:   usage.Used,
+			Device:   partitions[idx].Mountpoint,
+			Total:    usage.Total,
+			Free:     usage.Free,
+			Used:     usage.Used,
+			FSType:   usage.Fstype,
+			ReadOnly: slices.Contains(partitions[idx].Opts, "ro"),
+			Opts:     partitions[idx].Opts,
 		}
 	}
 
@@ -118,6 +132,11 @@ func (s *Snapshot) getZFSPoolData(ctx context.Context, pools []string) error {
 		return nil
 	}
 
+	// # zpool list -pH
+	// NAME   SIZE          ALLOC         FREE          CKPOINT EXPANDSZ FRAG CAP DEDUP HEALTH  ALTROOT
+	// data   3985729650688 2223640698880 1762088951808 -       -        10   55  1.00  ONLINE  -
+	// data2  996432412672  98463039488   897969373184  -       -        8    9   1.00  ONLINE  -
+	// data3  996432412672  44307656704   952124755968  -       -        4    4   1.00  ONLINE  -
 	cmd, stdout, waitg, err := readyCommand(ctx, false, "zpool", "list", "-pH")
 	if err != nil {
 		return err
@@ -131,7 +150,7 @@ func (s *Snapshot) getZFSPoolData(ctx context.Context, pools []string) error {
 
 			for _, pool := range pools {
 				if len(fields) > 3 && strings.EqualFold(fields[0], pool) {
-					s.ZFSPool[pool] = &Partition{Device: fields[4]}
+					s.ZFSPool[pool] = &Partition{Device: fields[4], FSType: "zfs", Opts: []string{fields[9]}}
 					s.ZFSPool[pool].Total, _ = strconv.ParseUint(fields[1], mnd.Base10, mnd.Bits64)
 					s.ZFSPool[pool].Free, _ = strconv.ParseUint(fields[3], mnd.Base10, mnd.Bits64)
 				}

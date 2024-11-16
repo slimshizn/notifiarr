@@ -3,7 +3,6 @@ package dashboard
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"time"
 
 	"github.com/Notifiarr/notifiarr/pkg/triggers/common"
@@ -43,8 +42,8 @@ type Sortable struct {
 	Name    string    `json:"name"`
 	Sub     string    `json:"subName,omitempty"`
 	Date    time.Time `json:"date"`
-	Season  int64     `json:"season,omitempty"`
-	Episode int64     `json:"episode,omitempty"`
+	Season  int       `json:"season,omitempty"`
+	Episode int       `json:"episode,omitempty"`
 }
 
 // SortableList allows sorting a list.
@@ -103,6 +102,7 @@ type States struct {
 	Qbit     []*State `json:"qbit"`
 	Deluge   []*State `json:"deluge"`
 	SabNZB   []*State `json:"sabnzbd"`
+	Xmission []*State `json:"transmission"`
 	Plex     any      `json:"plexSessions"`
 }
 
@@ -122,12 +122,12 @@ func (a *Action) Create() {
 }
 
 func (c *Cmd) create() {
-	var ticker *time.Ticker
+	var dur time.Duration
 
-	//nolint:gosec
 	if ci := clientinfo.Get(); ci != nil && ci.Actions.Dashboard.Interval.Duration > 0 {
-		randomTime := time.Duration(rand.Intn(randomMilliseconds)) * time.Millisecond
-		ticker = time.NewTicker(ci.Actions.Dashboard.Interval.Duration + randomTime)
+		dur = (time.Duration(c.Config.Rand().Intn(randomMilliseconds)) * time.Millisecond) +
+			ci.Actions.Dashboard.Interval.Duration
+
 		c.Printf("==> Dashboard State timer started, interval:%s", ci.Actions.Dashboard.Interval)
 	}
 
@@ -135,7 +135,7 @@ func (c *Cmd) create() {
 		Name: TrigDashboard,
 		Fn:   c.sendDashboardState,
 		C:    make(chan *common.ActionInput, 1),
-		T:    ticker,
+		D:    cnfg.Duration{Duration: dur},
 	})
 }
 
@@ -175,6 +175,7 @@ func (c *Cmd) getStates(ctx context.Context) *States {
 		Readarr:  c.getReadarrStates(ctx),
 		Sonarr:   c.getSonarrStates(ctx),
 		SabNZB:   c.getSabNZBStates(ctx),
+		Xmission: c.getTransmissionStates(ctx),
 		Plex:     sessions,
 	}
 }

@@ -4,7 +4,9 @@ package commands
 import (
 	"bytes"
 	"context"
-	"crypto/md5" //nolint:gosec
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -16,7 +18,9 @@ import (
 	"github.com/hugelgupf/go-shlex"
 )
 
-var ErrDisabled = fmt.Errorf("the command is disabled due to an error")
+var ErrDisabled = errors.New("the command is disabled due to an error")
+
+const hashLen = 64
 
 const (
 	argPfx = "({"
@@ -31,8 +35,12 @@ func (c *Command) Setup(logger mnd.Logger, website *website.Server) {
 		}
 	}
 
-	hash := md5.Sum([]byte(fmt.Sprint(c.Name, c.Command, c.Shell, c.Log, c.Notify, c.Timeout))) //nolint:gosec
-	c.Hash = fmt.Sprintf("%x", hash)
+	if len(c.Hash) != hashLen {
+		hash := sha256.New()
+		hash.Write([]byte(fmt.Sprint(time.Now(), c.Name, c.Command, c.Timeout)))
+		c.Hash = hex.EncodeToString(hash.Sum(nil))
+	}
+
 	c.log = logger
 	c.website = website
 	c.Args = len(c.args)
@@ -62,13 +70,13 @@ func (c *Command) SetupRegexpArgs() error {
 		arg := matches[idx]
 		instance := idx + 1
 
-		re, err := regexp.Compile(c.cmd[arg[0]+2 : arg[1]-2])
+		regex, err := regexp.Compile(c.cmd[arg[0]+2 : arg[1]-2])
 		if err != nil {
 			return fmt.Errorf("parsing command '%s' arg %d regexp: %w", c.Name, instance, err)
 		}
 
 		c.cmd = c.cmd[:arg[0]] + fmt.Sprintf("%s%d%s", argPfx, instance, argSfx) + c.cmd[arg[1]:]
-		c.args[idx] = re
+		c.args[idx] = regex
 	}
 
 	return nil

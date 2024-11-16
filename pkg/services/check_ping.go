@@ -1,6 +1,7 @@
 package services
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -11,9 +12,9 @@ import (
 
 // Custom errors.
 var (
-	ErrPingExpect    = fmt.Errorf("ping/icmp expect must contain three integers separated by two colons. ex: 3:2:500")
-	ErrNoPingVal     = fmt.Errorf("ping or icmp 'check' must not be empty")
-	ErrPingCountZero = fmt.Errorf("none of the ping expect values may be set to 0")
+	ErrPingExpect    = errors.New("ping/icmp expect must contain three integers separated by two colons. ex: 3:2:500")
+	ErrNoPingVal     = errors.New("ping or icmp 'check' must not be empty")
+	ErrPingCountZero = errors.New("none of the ping expect values may be set to 0")
 )
 
 /*
@@ -47,16 +48,17 @@ func (s *Service) checkPingValues(icmp bool) error {
 	return nil
 }
 
-func (s *Service) fillPingExpect(icmp bool) (err error) {
+func (s *Service) fillPingExpect(icmp bool) error {
 	s.svc.ping = &pingExpect{
 		icmp: icmp,
 	}
 
 	splitStr := strings.Split(s.Expect, ":")
-	if len(splitStr) != 3 { //nolint:gomnd
+	if len(splitStr) != 3 { //nolint:mnd
 		return ErrPingExpect
 	}
 
+	var err error
 	if s.svc.ping.count, err = strconv.Atoi(splitStr[0]); err != nil {
 		return fmt.Errorf("invalid packet send count: %s: %w", splitStr[0], err)
 	}
@@ -77,7 +79,7 @@ func (s *Service) checkPING() *result {
 	if err != nil {
 		return &result{
 			state:  StateUnknown,
-			output: "invalid ping value: " + err.Error(),
+			output: &Output{str: "invalid ping value: " + err.Error()},
 		}
 	}
 
@@ -89,7 +91,7 @@ func (s *Service) checkPING() *result {
 	if err = pinger.Run(); err != nil { // blocks.
 		return &result{
 			state:  StateCritical,
-			output: "error pinging service: " + err.Error(),
+			output: &Output{str: "error pinging service: " + err.Error()},
 		}
 	}
 
@@ -105,8 +107,8 @@ func (s *Service) checkPING() *result {
 
 	return &result{
 		state: state,
-		output: fmt.Sprintf("(%s) pkts sent:%d, rcvd:%d, loss:%.01f, max:%s, avg:%s",
+		output: &Output{str: fmt.Sprintf("(%s) pkts sent:%d, rcvd:%d, loss:%.01f, max:%s, avg:%s",
 			msg, stats.PacketsSent, stats.PacketsRecv, stats.PacketLoss,
-			stats.MaxRtt.Round(time.Millisecond), stats.AvgRtt.Round(time.Millisecond)),
+			stats.MaxRtt.Round(time.Millisecond), stats.AvgRtt.Round(time.Millisecond))},
 	}
 }

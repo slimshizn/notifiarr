@@ -3,10 +3,12 @@ package website
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
 	"github.com/Notifiarr/notifiarr/pkg/apps/apppkg/plex"
+	"github.com/Notifiarr/notifiarr/pkg/mnd"
 	"github.com/Notifiarr/notifiarr/pkg/snapshot"
 	"golift.io/cnfg"
 )
@@ -25,6 +27,7 @@ const (
 	EventMovie   EventType = "movie"
 	EventEpisode EventType = "episode"
 	EventPoll    EventType = "poll"
+	EventCheck   EventType = "upcheck"
 	EventSignal  EventType = "signal"
 	EventFile    EventType = "file"
 	EventSet     EventType = "setStates"
@@ -44,10 +47,17 @@ type Request struct {
 	Event      EventType
 	Params     []string    // optional.
 	Payload    interface{} // data to send.
+	UploadFile *UploadFile // file to send (instead of payload).
 	LogMsg     string      // if empty, nothing is logged.
-	LogPayload bool        // debug log the sent payload
+	LogPayload bool        // debug log the sent payload.
 	ErrorsOnly bool        // only log errors.
 	respChan   chan *chResponse
+}
+
+// UploadFile is the file upload identifier in a request.
+type UploadFile struct {
+	FileName string
+	io.ReadCloser
 }
 
 // chResponse is used to send a website response through a channel.
@@ -104,12 +114,17 @@ api/v1/user/trash?app=...
   sonarr
 */
 const (
-	BaseURL             = "https://notifiarr.com"
-	userRoute1    Route = "/api/v1/user"
-	userRoute2    Route = "/api/v2/user"
-	ClientRoute   Route = userRoute2 + "/client"
-	CFSyncRoute   Route = userRoute1 + "/trash"
-	GapsRoute     Route = userRoute1 + "/gaps"
+	BaseURL = "https://notifiarr.com"
+
+	userRoute1   Route = "/api/v1/user"
+	CFSyncRoute  Route = userRoute1 + "/trash"
+	GapsRoute    Route = userRoute1 + "/gaps"
+	MdbListRoute Route = userRoute1 + "/mdblist"
+	TunnelRoute  Route = userRoute1 + "/tunnel"
+
+	userRoute2  Route = "/api/v2/user"
+	ClientRoute Route = userRoute2 + "/client"
+
 	notifiRoute   Route = "/api/v1/notification"
 	DashRoute     Route = notifiRoute + "/dashboard"
 	StuckRoute    Route = notifiRoute + "/stuck"
@@ -123,6 +138,9 @@ const (
 	PkgRoute      Route = notifiRoute + "/packageManager"
 	LogLineRoute  Route = notifiRoute + "/logWatcher"
 	CommandRoute  Route = notifiRoute + "/command"
+
+	systemRoute Route = "/api/v1/system"
+	UploadRoute Route = systemRoute + "/upload"
 )
 
 // Path adds parameters to a route path and turns it into a string.
@@ -191,6 +209,8 @@ func (r Route) Path(event EventType, params ...string) string {
 */
 // nitsua: all responses should be that way.. but response might not always be an object.
 type Response struct {
+	size    int64
+	sent    int
 	Result  string `json:"result"`
 	Details struct {
 		Response json.RawMessage `json:"response"` // can be anything. type it out later.
@@ -207,6 +227,6 @@ func (r *Response) String() string {
 		return ""
 	}
 
-	return fmt.Sprintf(" => Website took %s and replied with: %s, %s %s",
-		r.Details.Elapsed, r.Result, r.Details.Response, r.Details.Help)
+	return fmt.Sprintf(" => Website took %s and replied with (%s): %s, %s %s",
+		r.Details.Elapsed, mnd.FormatBytes(r.size), r.Result, r.Details.Response, r.Details.Help)
 }

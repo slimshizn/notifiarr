@@ -2,8 +2,11 @@ package clientinfo
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/Notifiarr/notifiarr/pkg/apps"
@@ -13,7 +16,7 @@ import (
 	"github.com/Notifiarr/notifiarr/pkg/triggers/data"
 	"github.com/Notifiarr/notifiarr/pkg/ui"
 	"github.com/Notifiarr/notifiarr/pkg/website"
-	"github.com/shirou/gopsutil/v3/host"
+	"github.com/shirou/gopsutil/v4/host"
 	"golift.io/version"
 )
 
@@ -49,6 +52,8 @@ type AppInfoClient struct {
 	Arch string `json:"arch"`
 	// Application Build Date.
 	BuildDate string `json:"buildDate"`
+	// Branch application built from.
+	Branch string `json:"branch"`
 	// Go Version app built with.
 	GoVersion string `json:"goVersion"`
 	// OS app is running on.
@@ -65,6 +70,10 @@ type AppInfoClient struct {
 	Docker bool `json:"docker"`
 	// Application has a GUI? (windows/mac only)
 	HasGUI bool `json:"hasGui"`
+	// Listen is the IP and port the client has configured.
+	Listen string `json:"listen"`
+	// Application supports tunnelling.
+	Tunnel bool `json:"tunnel"`
 }
 
 // AppInfoConfig contains exported running configuration information for this app.
@@ -99,7 +108,7 @@ type AppInfoTautulli struct {
 }
 
 // Info is used for JSON input for our outgoing app info.
-func (c *Config) Info(ctx context.Context, startup bool) *AppInfo {
+func (c *Config) Info(ctx context.Context, startup bool) *AppInfo { //nolint:funlen
 	numPlex := 0 // maybe one day we'll support more than 1 plex.
 	if c.Apps.Plex.Enabled() {
 		numPlex = 1
@@ -112,13 +121,21 @@ func (c *Config) Info(ctx context.Context, startup bool) *AppInfo {
 
 	host, err := c.GetHostInfo(ctx)
 	if err == nil {
-		err = fmt.Errorf("") //nolint:goerr113
+		err = errors.New("") //nolint:goerr113
+	}
+
+	split := strings.Split(c.Config.BindAddr, ":")
+
+	port := split[0]
+	if len(split) > 1 {
+		port = split[1]
 	}
 
 	return &AppInfo{
 		Client: &AppInfoClient{
 			Arch:      runtime.GOARCH,
 			BuildDate: version.BuildDate,
+			Branch:    version.Branch,
 			GoVersion: version.GoVersion,
 			OS:        runtime.GOOS,
 			Revision:  version.Revision,
@@ -127,20 +144,23 @@ func (c *Config) Info(ctx context.Context, startup bool) *AppInfo {
 			Started:   version.Started,
 			Docker:    mnd.IsDocker,
 			HasGUI:    ui.HasGUI(),
+			Listen:    GetOutboundIP() + ":" + port,
+			Tunnel:    true, // no toggle for this.
 		},
 		Num: map[string]int{
-			"nzbget":   len(c.Apps.NZBGet),
-			"deluge":   len(c.Apps.Deluge),
-			"lidarr":   len(c.Apps.Lidarr),
-			"plex":     numPlex,
-			"prowlarr": len(c.Apps.Prowlarr),
-			"qbit":     len(c.Apps.Qbit),
-			"rtorrent": len(c.Apps.Rtorrent),
-			"radarr":   len(c.Apps.Radarr),
-			"readarr":  len(c.Apps.Readarr),
-			"tautulli": numTautulli,
-			"sabnzbd":  len(c.Apps.SabNZB),
-			"sonarr":   len(c.Apps.Sonarr),
+			"nzbget":       len(c.Apps.NZBGet),
+			"deluge":       len(c.Apps.Deluge),
+			"lidarr":       len(c.Apps.Lidarr),
+			"plex":         numPlex,
+			"prowlarr":     len(c.Apps.Prowlarr),
+			"qbit":         len(c.Apps.Qbit),
+			"rtorrent":     len(c.Apps.Rtorrent),
+			"transmission": len(c.Apps.Transmission),
+			"radarr":       len(c.Apps.Radarr),
+			"readarr":      len(c.Apps.Readarr),
+			"tautulli":     numTautulli,
+			"sabnzbd":      len(c.Apps.SabNZB),
+			"sonarr":       len(c.Apps.Sonarr),
 		},
 		Config: AppInfoConfig{
 			WebsiteTimeout: c.Server.Config.Timeout.String(),
@@ -210,4 +230,19 @@ func (c *Config) tautulliUsers(ctx context.Context) (*tautulli.Users, error) {
 	data.Save(tautulliUsersKey, users)
 
 	return users, nil
+}
+
+func GetOutboundIP() string {
+	conn, err := net.Dial("udp", "1.1.1.1:437")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+
+	localAddr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return conn.LocalAddr().String()
+	}
+
+	return localAddr.IP.String()
 }

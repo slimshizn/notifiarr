@@ -3,12 +3,12 @@ package gaps
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"time"
 
 	"github.com/Notifiarr/notifiarr/pkg/triggers/common"
 	"github.com/Notifiarr/notifiarr/pkg/website"
 	"github.com/Notifiarr/notifiarr/pkg/website/clientinfo"
+	"golift.io/cnfg"
 	"golift.io/starr/radarr"
 )
 
@@ -38,13 +38,12 @@ func (a *Action) Create() {
 }
 
 func (c *cmd) create() {
-	var ticker *time.Ticker
+	var dur time.Duration
 
 	ci := clientinfo.Get()
-	//nolint:gosec
 	if ci != nil && ci.Actions.Gaps.Interval.Duration > 0 && len(ci.Actions.Gaps.Instances) > 0 {
-		randomTime := time.Duration(rand.Intn(randomMilliseconds)) * time.Millisecond
-		ticker = time.NewTicker(ci.Actions.Gaps.Interval.Duration + randomTime)
+		randomTime := time.Duration(c.Config.Rand().Intn(randomMilliseconds)) * time.Millisecond
+		dur = ci.Actions.Gaps.Interval.Duration + randomTime
 		c.Printf("==> Collection Gaps Timer Enabled, interval:%s", ci.Actions.Gaps.Interval)
 	}
 
@@ -52,7 +51,7 @@ func (c *cmd) create() {
 		Name: TrigCollectionGaps,
 		Fn:   c.sendGaps,
 		C:    make(chan *common.ActionInput, 1),
-		T:    ticker,
+		D:    cnfg.Duration{Duration: dur},
 	})
 }
 
@@ -62,8 +61,8 @@ func (a *Action) Send(event website.EventType) {
 }
 
 func (c *cmd) sendGaps(ctx context.Context, input *common.ActionInput) {
-	ci := clientinfo.Get()
-	if ci == nil || len(ci.Actions.Gaps.Instances) == 0 || len(c.Apps.Radarr) == 0 {
+	info := clientinfo.Get()
+	if info == nil || len(info.Actions.Gaps.Instances) == 0 || len(c.Apps.Radarr) == 0 {
 		c.Errorf("[%s requested] Cannot send Radarr Collection Gaps: instances or configured Radarrs (%d) are zero.",
 			input.Type, len(c.Apps.Radarr))
 		return
@@ -71,7 +70,7 @@ func (c *cmd) sendGaps(ctx context.Context, input *common.ActionInput) {
 
 	for idx, app := range c.Apps.Radarr {
 		instance := idx + 1
-		if !app.Enabled() || !ci.Actions.Gaps.Instances.Has(instance) {
+		if !app.Enabled() || !info.Actions.Gaps.Instances.Has(instance) {
 			continue
 		}
 
@@ -81,7 +80,7 @@ func (c *cmd) sendGaps(ctx context.Context, input *common.ActionInput) {
 			Movies   []*radarr.Movie `json:"movies"`
 		}
 
-		movies, err := app.GetMovieContext(ctx, 0)
+		movies, err := app.GetMovieContext(ctx, &radarr.GetMovie{ExcludeLocalCovers: true})
 		if err != nil {
 			c.Errorf("[%s requested] Radarr Collection Gaps (%d:%s) failed: getting movies: %v",
 				input.Type, instance, app.URL, err)

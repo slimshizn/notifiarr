@@ -61,6 +61,12 @@ OPTIONS
         This reads from stdin from dpkg, and sends it off to notifiarr.com.
         Will not work on any OS except Linux; only designed for Debian OSes.
 
+    --reset
+        This flag reads in the config file provided with --config, changes
+        the ui_password to a new random value, prints it, and saves the file.
+        Use this when you get locked out of the Web UI interface.
+        Must reload or restart after this updates the config file.
+
     -v, --version
         Display version and exit.
 
@@ -73,17 +79,13 @@ CONFIGURATION
 The default configuration file location changes depending on operating system.
 See the provided example configuration file for parameter information.
 
-INPUT
----
-
-On Windows and with the App version on macOS you can work with the app using the
-system tray menu. On Unix OSes you can send a USR1 signal to re-write the config
-file using a built-in template. Backup your existing config file first.
-
 AUTHOR
 ---
 *   David Newhall II - 12/2020
 
 LOCATION
 ---
-* Notifiarr: [https://github.com/Notifiarr/notifiarr](https://github.com/Notifiarr/notifiarr)
+* Code: [https://github.com/Notifiarr/notifiarr](https://github.com/Notifiarr/notifiarr)
+* WWW: [https://notifiarr.com](https://notifiarr.com)
+* Help: [https://notifiarr.wiki](https://notifiarr.wiki)
+* Chat: [https://notifiarr.com/discord](https://notifiarr.com/discord)

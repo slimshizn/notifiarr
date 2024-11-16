@@ -29,43 +29,64 @@ var (
 // These are enforced on GUI OSes (like macOS.app and Windows).
 func (l *Logger) setDefaultLogPaths() {
 	// Make sure log file paths exist if AppName is provided; this indicates GUI OS.
-	if l.LogConfig.AppName != "" {
+	if l.LogConfig.AppName != "" { // This only happens if ui.HasGUI() is true.
+		base := ".notifiarr" // windows and macos
+		if !mnd.IsWindows && !mnd.IsDarwin {
+			base = ".config/notifiarr" // *nix desktop
+		}
+
 		if l.LogConfig.LogFile == "" {
-			l.LogConfig.LogFile = filepath.Join("~", ".notifiarr", l.LogConfig.AppName+defExt)
+			l.LogConfig.LogFile = filepath.Join("~", base, l.LogConfig.AppName+defExt)
 		}
 
 		if l.LogConfig.HTTPLog == "" {
-			l.LogConfig.HTTPLog = filepath.Join("~", ".notifiarr", l.LogConfig.AppName+httpExt)
+			l.LogConfig.HTTPLog = filepath.Join("~", base, l.LogConfig.AppName+httpExt)
 		}
 	}
 }
 
-// setLogPaths sets the log paths for app and http logs.
-func (l *Logger) setLogPaths() {
+// setAppLogPath sets the log path for app log.
+func (l *Logger) setAppLogPath() {
 	// Regular log file.
-	if l.LogConfig.LogFile != "" {
-		if f, err := homedir.Expand(l.LogConfig.LogFile); err == nil {
-			l.LogConfig.LogFile = f
-		} else if l.LogConfig.AppName != "" {
-			l.LogConfig.LogFile = l.LogConfig.AppName + defExt
-		}
-
-		if f, err := filepath.Abs(l.LogConfig.LogFile); err == nil {
-			l.LogConfig.LogFile = f
-		}
+	if l.LogConfig.LogFile == "" {
+		return
 	}
 
-	// HTTP log file.
-	if l.LogConfig.HTTPLog != "" {
-		if f, err := homedir.Expand(l.LogConfig.HTTPLog); err == nil {
-			l.LogConfig.HTTPLog = f
-		} else if l.LogConfig.AppName != "" {
-			l.LogConfig.HTTPLog = l.LogConfig.AppName + httpExt
-		}
+	if f, err := homedir.Expand(l.LogConfig.LogFile); err == nil {
+		l.LogConfig.LogFile = f
+	} else if l.LogConfig.AppName != "" {
+		l.LogConfig.LogFile = l.LogConfig.AppName + defExt
+	}
 
-		if f, err := filepath.Abs(l.LogConfig.HTTPLog); err == nil {
-			l.LogConfig.HTTPLog = f
-		}
+	if f, err := filepath.Abs(l.LogConfig.LogFile); err == nil {
+		l.LogConfig.LogFile = f
+	}
+
+	// If a directory was provided, append a file name.
+	if stat, _ := os.Stat(l.LogConfig.LogFile); stat != nil && stat.IsDir() {
+		l.LogConfig.LogFile = filepath.Join(l.LogConfig.LogFile, mnd.Title+defExt)
+	}
+}
+
+// setHTTPLogPath sets the log path for HTTP log.
+func (l *Logger) setHTTPLogPath() {
+	if l.LogConfig.HTTPLog == "" {
+		return
+	}
+
+	if f, err := homedir.Expand(l.LogConfig.HTTPLog); err == nil {
+		l.LogConfig.HTTPLog = f
+	} else if l.LogConfig.AppName != "" {
+		l.LogConfig.HTTPLog = l.LogConfig.AppName + httpExt
+	}
+
+	if f, err := filepath.Abs(l.LogConfig.HTTPLog); err == nil {
+		l.LogConfig.HTTPLog = f
+	}
+
+	// If a directory was provided, append a file name.
+	if stat, _ := os.Stat(l.LogConfig.HTTPLog); stat != nil && stat.IsDir() {
+		l.LogConfig.HTTPLog = filepath.Join(l.LogConfig.HTTPLog, mnd.Title+httpExt)
 	}
 }
 
@@ -130,6 +151,12 @@ func (l *Logger) openDebugLog() {
 		l.LogConfig.DebugLog = f
 	}
 
+	if stat, err := os.Stat(l.LogConfig.DebugLog); err == nil {
+		if stat.IsDir() {
+			l.LogConfig.DebugLog = filepath.Join(l.LogConfig.DebugLog, mnd.Title+".debug"+defExt)
+		}
+	}
+
 	rotateDebug := &rotatorr.Config{
 		Filepath: l.LogConfig.DebugLog,                        // log file name.
 		FileSize: int64(l.LogConfig.LogFileMb) * mnd.Megabyte, // mnd.Megabytes
@@ -192,21 +219,28 @@ type LogFileInfo struct {
 	User string
 }
 
-// GetAllLogFilePaths searches the disk for log file names.
-func (l *Logger) GetAllLogFilePaths() *LogFileInfos {
+// GetActiveLogFilePaths returns the configured log file paths.
+func (l *LogConfig) GetActiveLogFilePaths() []string {
 	logFiles := []string{
-		l.LogConfig.LogFile,
-		l.LogConfig.HTTPLog,
-		l.LogConfig.DebugLog,
+		l.LogFile,
+		l.HTTPLog,
+		l.DebugLog,
 	}
 
 	for cust := range customLog {
-		if name := customLog[cust].File.Name(); name != "" {
-			logFiles = append(logFiles, name)
+		if customLog[cust] != nil && customLog[cust].File != nil {
+			if name := customLog[cust].File.Name(); name != "" {
+				logFiles = append(logFiles, name)
+			}
 		}
 	}
 
-	return GetFilePaths(logFiles...)
+	return logFiles
+}
+
+// GetAllLogFilePaths searches the disk for log file names.
+func (l *Logger) GetAllLogFilePaths() *LogFileInfos {
+	return GetFilePaths(l.LogConfig.GetActiveLogFilePaths()...)
 }
 
 // GetFilePaths is a helper function that returns data about similar files in
@@ -241,13 +275,15 @@ func GetFilePaths(files ...string) *LogFileInfos { //nolint:cyclop
 
 	output := &LogFileInfos{List: []*LogFileInfo{}, Dirs: map2list(dirs)}
 
+	var used bool
+
 	for filePath := range contain {
 		fileInfo, err := os.Stat(filePath)
 		if err != nil || fileInfo.IsDir() {
 			continue
 		}
 
-		used := false
+		used = false
 
 		for _, name := range files {
 			if name == filePath {

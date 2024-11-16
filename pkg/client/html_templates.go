@@ -2,11 +2,13 @@ package client
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path"
@@ -20,16 +22,20 @@ import (
 	"github.com/Notifiarr/notifiarr/pkg/configfile"
 	"github.com/Notifiarr/notifiarr/pkg/logs"
 	"github.com/Notifiarr/notifiarr/pkg/mnd"
+	"github.com/Notifiarr/notifiarr/pkg/private"
 	"github.com/Notifiarr/notifiarr/pkg/snapshot"
+	"github.com/Notifiarr/notifiarr/pkg/triggers"
 	"github.com/Notifiarr/notifiarr/pkg/triggers/data"
 	"github.com/Notifiarr/notifiarr/pkg/website/clientinfo"
 	"github.com/fsnotify/fsnotify"
 	"github.com/hako/durafmt"
+	"github.com/jackpal/gateway"
 	"github.com/mitchellh/go-homedir"
-	"github.com/shirou/gopsutil/v3/host"
+	"github.com/shirou/gopsutil/v4/host"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 	"golift.io/cnfg"
+	mulery "golift.io/mulery/client"
 	"golift.io/version"
 )
 
@@ -102,15 +108,17 @@ func (c *Client) watchAssetsTemplates(ctx context.Context, fsn *fsnotify.Watcher
 				c.Errorf("fsnotify/parsing templates: %v", err)
 			}
 
-			c.StartWebServer()
+			c.StartWebServer(ctx)
 		}
 	}
 }
 
-func (c *Client) getFuncMap() template.FuncMap { //nolint:funlen
+//nolint:funlen,cyclop,nonamedreturns
+func (c *Client) getFuncMap() template.FuncMap {
 	title := cases.Title(language.AmericanEnglish)
 
 	return template.FuncMap{
+		"lower": strings.ToLower,
 		"cutindex": func(str, delim, def string, idx int) string {
 			split := strings.Split(str, delim)
 			if idx >= len(split) {
@@ -138,7 +146,7 @@ func (c *Client) getFuncMap() template.FuncMap { //nolint:funlen
 		// returns the current time.
 		"now": time.Now,
 		// returns an integer divided by a million.
-		"megabyte": megabyte,
+		"megabyte": mnd.FormatBytes,
 		// returns the URL base.
 		"base": func() string { return path.Join(c.Config.URLBase, "ui") + "/" },
 		// returns the files url base.
@@ -146,12 +154,10 @@ func (c *Client) getFuncMap() template.FuncMap { //nolint:funlen
 		// adds 1 an integer, to deal with instance IDs for humans.
 		"instance": func(idx int) int { return idx + 1 },
 		// returns true if the environment variable has a value.
-		"locked":   func(env string) bool { return os.Getenv(env) != "" },
+		"locked":   func(env string) bool { return c.Flags.ConfigFile == "" || os.Getenv(env) != "" },
 		"contains": strings.Contains,
 		"since":    since,
-		"percent": func(i, j float64) int64 {
-			return int64(i / j * 100) //nolint:gomnd
-		},
+		"percent":  func(i, j float64) int64 { return int64(i / j * 100) }, //nolint:mnd
 		"min": func(s string) string {
 			for _, pieces := range strings.Split(s, ",") {
 				if split := strings.Split(pieces, ":"); len(split) >= 2 && split[0] == "count" {
@@ -177,6 +183,12 @@ func (c *Client) getFuncMap() template.FuncMap { //nolint:funlen
 		"add": func(i, j float64) float64 {
 			return i + j
 		},
+		"oneto": func(to int) (num []int) {
+			for i := 1; i < to; i++ {
+				num = append(num, i)
+			}
+			return num
+		},
 		"intervaloptions": intervaloptions,
 	}
 }
@@ -190,6 +202,8 @@ type option struct {
 func intervaloptions(current cnfg.Duration) []*option { //nolint:funlen
 	times := []time.Duration{
 		-1 * time.Second, // Disable Service Checks
+		10 * time.Second,
+		15 * time.Second,
 		30 * time.Second,
 		45 * time.Second,
 		1 * time.Minute,
@@ -282,24 +296,24 @@ func durShort(dur time.Duration) string {
 	output = strings.ReplaceAll(output, "s", " sec")
 	output = strings.ReplaceAll(output, "h", " hour")
 
-	s := ""
+	suffix := ""
 	if dur.Hours() != 1 {
-		s = "s"
+		suffix = "s"
 	}
 
 	if dur.Minutes() != 0 {
-		output = strings.ReplaceAll(output, "hour", "hour"+s+" ")
+		output = strings.ReplaceAll(output, "hour", "hour"+suffix+" ")
 	}
 
-	s = ""
+	suffix = ""
 	if dur.Minutes() != 1 {
-		s = "s"
+		suffix = "s"
 	}
 
 	if dur.Seconds() > 60 && int(dur.Seconds())%60 != 0 || int(dur.Hours()) > 0 {
 		output = strings.ReplaceAll(output, "min", "min ")
 	} else {
-		output = strings.ReplaceAll(output, "min", "minute"+s)
+		output = strings.ReplaceAll(output, "min", "minute"+suffix)
 	}
 
 	if dur.Minutes() < 1 {
@@ -309,49 +323,68 @@ func durShort(dur time.Duration) string {
 	return output
 }
 
-func megabyte(size interface{}) string {
-	val := int64(0)
-
-	switch valtype := size.(type) {
-	case int64:
-		val = valtype
-	case uint64:
-		val = int64(valtype)
-	case int:
-		val = int64(valtype)
-	}
-
-	switch {
-	case val > mnd.Megabyte*mnd.Megabyte*mnd.Kilobyte*1000:
-		return fmt.Sprintf("%.2f Eb", float64(val)/float64(mnd.Megabyte*mnd.Megabyte*mnd.Megabyte))
-	case val > mnd.Megabyte*mnd.Megabyte*1000:
-		return fmt.Sprintf("%.2f Pb", float64(val)/float64(mnd.Megabyte*mnd.Megabyte*mnd.Kilobyte))
-	case val > mnd.Megabyte*mnd.Kilobyte*1000:
-		return fmt.Sprintf("%.2f Tb", float64(val)/float64(mnd.Megabyte*mnd.Megabyte))
-	case val > mnd.Megabyte*1000:
-		return fmt.Sprintf("%.2f Gb", float64(val)/float64(mnd.Megabyte*mnd.Kilobyte))
-	case val > mnd.Kilobyte*1000:
-		return fmt.Sprintf("%.1f Mb", float64(val)/float64(mnd.Megabyte))
-	default:
-		return fmt.Sprintf("%.1f Kb", float64(val)/float64(mnd.Kilobyte))
-	}
-}
-
 func since(t time.Time) string {
 	if t.IsZero() {
 		return "N/A"
 	}
+	//nolint:mnd
+	return strings.ReplaceAll(durafmt.Parse(time.Since(t)).LimitFirstN(3).Format(mnd.DurafmtShort), " ", "")
+}
 
-	return strings.ReplaceAll(durafmt.Parse(time.Since(t).Round(time.Second)).
-		LimitFirstN(3). //nolint:gomnd
-		Format(durafmt.Units{
-			Year:   durafmt.Unit{Singular: "y", Plural: "y"},
-			Week:   durafmt.Unit{Singular: "w", Plural: "w"},
-			Day:    durafmt.Unit{Singular: "d", Plural: "d"},
-			Hour:   durafmt.Unit{Singular: "h", Plural: "h"},
-			Minute: durafmt.Unit{Singular: "m", Plural: "m"},
-			Second: durafmt.Unit{Singular: "s", Plural: "s"},
-		}), " ", "")
+func (c *Client) parseTemplatesDirectory(filePath string) error {
+	items, err := bindata.Templates.ReadDir(filePath)
+	if err != nil {
+		return fmt.Errorf("failed reading internal templates: %w", err)
+	}
+
+	var data []byte
+
+	for _, entry := range items {
+		filePath := path.Join(filePath, entry.Name())
+
+		if entry.IsDir() { // Recursion.
+			if err := c.parseTemplatesDirectory(filePath); err != nil {
+				return err
+			}
+
+			continue
+		}
+
+		if strings.HasSuffix(filePath, ".gz") {
+			if data, err = decompressTemplate(filePath); err != nil {
+				return err
+			}
+		} else if data, err = bindata.Templates.ReadFile(filePath); err != nil {
+			return fmt.Errorf("failed reading internal template %s: %w", filePath, err)
+		}
+
+		filePath = strings.TrimSuffix(strings.TrimPrefix(filePath, "templates/"), ".gz") // no leading junk.
+		if c.template, err = c.template.New(filePath).Parse(string(data)); err != nil {
+			return fmt.Errorf("bug parsing internal template: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func decompressTemplate(filePath string) ([]byte, error) {
+	data, err := bindata.Templates.Open(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("opening compressed internal template %s: %w", filePath, err)
+	}
+	defer data.Close()
+
+	gzip, err := gzip.NewReader(data)
+	if err != nil {
+		return nil, fmt.Errorf("decompressing internal template %s: %w", filePath, err)
+	}
+
+	output, err := io.ReadAll(gzip)
+	if err != nil {
+		return nil, fmt.Errorf("reading compressed internal template %s: %w", filePath, err)
+	}
+
+	return output, nil
 }
 
 // ParseGUITemplates parses the baked-in templates, and overrides them if a template directory is provided.
@@ -360,16 +393,8 @@ func (c *Client) ParseGUITemplates() error {
 	index := "<p>" + c.Flags.Name() + `: <strong>working</strong></p>`
 	c.template = template.Must(template.New("index.html").Parse(index)).Funcs(c.getFuncMap())
 
-	var err error
-
-	// Parse all our compiled-in templates.
-	for _, name := range bindata.AssetNames() {
-		if strings.HasPrefix(name, "templates/") {
-			trim := strings.TrimPrefix(name, "templates/")
-			if c.template, err = c.template.New(trim).Parse(bindata.MustAssetString(name)); err != nil {
-				return fmt.Errorf("bug parsing internal template: %w", err)
-			}
-		}
+	if err := c.parseTemplatesDirectory("templates"); err != nil {
+		return err
 	}
 
 	if c.Flags.Assets != "" {
@@ -386,25 +411,38 @@ func (c *Client) parseCustomTemplates() error {
 
 	return filepath.Walk(templatePath, func(path string, info os.FileInfo, err error) error { //nolint:wrapcheck
 		if err != nil {
-			return fmt.Errorf("walking custom template path: %w", err)
+			return fmt.Errorf("walking custom template path %s: %w", path, err)
 		}
 
 		if info.IsDir() {
 			return nil // cannot parse directories.
 		}
 
-		// Convert windows paths to unix paths for template names.
-		trim := strings.TrimPrefix(strings.ReplaceAll(strings.TrimPrefix(path, templatePath), `\`, "/"), "/")
-		c.Debugf("Parsing Template File '%s' to %s", path, trim)
-
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return fmt.Errorf("reading custom template: %w", err)
+			return fmt.Errorf("reading custom template %s: %w", path, err)
 		}
+
+		if strings.HasSuffix(path, ".gz") {
+			gz, err := gzip.NewReader(bytes.NewBuffer(data))
+			if err != nil {
+				return fmt.Errorf("decompressing custom template %s: %w", path, err)
+			}
+
+			data, err = io.ReadAll(gz)
+			if err != nil {
+				return fmt.Errorf("reading compressed custom template %s: %w", path, err)
+			}
+		}
+
+		// Convert windows paths to unix paths for template names.
+		trim := strings.TrimSuffix(strings.TrimPrefix(strings.ReplaceAll(
+			strings.TrimPrefix(path, templatePath), `\`, "/"), "/"), ".gz")
+		c.Debugf("Parsed Template File '%s' to %s", path, trim)
 
 		c.template, err = c.template.New(trim).Parse(string(data))
 		if err != nil {
-			return fmt.Errorf("parsing custom template: %w", err)
+			return fmt.Errorf("parsing custom template %s: %w", path, err)
 		}
 
 		return nil
@@ -412,22 +450,29 @@ func (c *Client) parseCustomTemplates() error {
 }
 
 type templateData struct {
+	Input       *configfile.Config             `json:"input"`
 	Config      *configfile.Config             `json:"config"`
 	Flags       *configfile.Flags              `json:"flags"`
+	Actions     *triggers.Actions              `json:"actions"`
 	Username    string                         `json:"username"`
 	Dynamic     bool                           `json:"dynamic"`
 	Webauth     bool                           `json:"webauth"`
 	Msg         string                         `json:"msg,omitempty"`
-	Version     map[string]interface{}         `json:"version"`
+	Version     map[string]any                 `json:"version"`
 	LogFiles    *logs.LogFileInfos             `json:"logFileInfo"`
 	ConfigFiles *logs.LogFileInfos             `json:"configFileInfo"`
 	ClientInfo  *clientinfo.ClientInfo         `json:"clientInfo"`
 	Expvar      mnd.AllData                    `json:"expvar"`
 	HostInfo    *host.InfoStat                 `json:"hostInfo"`
 	Disks       map[string]*snapshot.Partition `json:"disks"`
+	Headers     http.Header                    `json:"headers"`
+	ProxyAllow  bool                           `json:"proxyAllow"`
+	UpstreamIP  string                         `json:"upstreamIp"`
+	Tunnel      *mulery.Client                 `json:"tunnel"`
+	PoolStats   map[string]*mulery.PoolSize    `json:"poolStats"`
 }
 
-func (c *Client) renderTemplate(
+func (c *Client) renderTemplate( //nolint:funlen
 	ctx context.Context,
 	response io.Writer,
 	req *http.Request,
@@ -441,11 +486,17 @@ func (c *Client) renderTemplate(
 
 	binary, _ := os.Executable()
 	userName, dynamic := c.getUserName(req)
-	hostInfo, _ := c.website.GetHostInfo(ctx)
+	hostInfo, _ := c.Config.GetHostInfo(ctx)
 	backupPath := filepath.Join(filepath.Dir(c.Flags.ConfigFile), "backups", filepath.Base(c.Flags.ConfigFile))
+	outboundIP := clientinfo.GetOutboundIP()
+	ifName, netmask := getIfNameAndNetmask(outboundIP)
 
 	err := c.template.ExecuteTemplate(response, templateName, &templateData{
+		ProxyAllow:  c.Config.Allow.Contains(req.RemoteAddr),
+		UpstreamIP:  strings.Trim(req.RemoteAddr[:strings.LastIndex(req.RemoteAddr, ":")], "[]"),
+		Actions:     c.triggers,
 		Config:      c.Config,
+		Input:       c.Input,
 		Flags:       c.Flags,
 		Username:    userName,
 		Dynamic:     dynamic,
@@ -455,6 +506,8 @@ func (c *Client) renderTemplate(
 		ConfigFiles: logs.GetFilePaths(c.Flags.ConfigFile, backupPath),
 		ClientInfo:  clientInfo,
 		Disks:       c.getDisks(ctx),
+		Headers:     req.Header,
+		Tunnel:      c.tunnel,
 		Version: map[string]interface{}{
 			"started":   version.Started.Round(time.Second),
 			"program":   c.Flags.Name(),
@@ -471,6 +524,11 @@ func (c *Client) renderTemplate(
 			"docker":    mnd.IsDocker,
 			"uid":       os.Getuid(),
 			"gid":       os.Getgid(),
+			"ip":        outboundIP,
+			"gateway":   getGateway(),
+			"ifName":    ifName,
+			"netmask":   netmask,
+			"md5":       private.MD5(),
 		},
 		Expvar:   mnd.GetAllData(),
 		HostInfo: hostInfo,
@@ -484,7 +542,7 @@ func environ() map[string]string {
 	out := make(map[string]string)
 
 	for _, v := range os.Environ() {
-		if s := strings.SplitN(v, "=", 2); len(s) == 2 && s[0] != "" { //nolint:gomnd
+		if s := strings.SplitN(v, "=", 2); len(s) == 2 && s[0] != "" { //nolint:mnd
 			out[s[0]] = s[1]
 		}
 	}
@@ -492,19 +550,34 @@ func environ() map[string]string {
 	return out
 }
 
-func (c *Client) setUserPass(ctx context.Context, username, password string) error {
+func (c *Client) setUserPass(ctx context.Context, authType, username, password string) error {
 	c.Lock()
 	defer c.Unlock()
 
 	current := c.Config.UIPassword
 
-	err := c.Config.UIPassword.Set(username + ":" + password)
-	if err != nil {
-		c.Config.UIPassword = current
-		return fmt.Errorf("saving username and password: %w", err)
+	var err error
+
+	switch authType {
+	default:
+		err = c.Config.UIPassword.Set(username + ":" + password)
+	case "header":
+		err = c.Config.UIPassword.SetHeader(username)
+	case "nopass":
+		err = c.Config.UIPassword.SetNoAuth(username)
 	}
 
-	if err := c.saveNewConfig(ctx, c.Config); err != nil {
+	if err != nil {
+		c.Config.UIPassword = current
+		return fmt.Errorf("saving new auth settings: %w", err)
+	}
+
+	config, err := c.Config.CopyConfig()
+	if err != nil {
+		return fmt.Errorf("copying config: %w", err)
+	}
+
+	if err := c.saveNewConfig(ctx, config); err != nil {
 		c.Config.UIPassword = current
 		return err
 	}
@@ -597,7 +670,7 @@ func readFileTail(fileHandle *os.File, fileSize int64, count, skip int) ([]byte,
 
 	// This is a magic number.
 	// We assume 150 characters per line to optimize the buffer.
-	output.Grow(count * 150) //nolint:gomnd
+	output.Grow(count * 150) //nolint:mnd
 
 	for {
 		location-- // read 1 byte
@@ -609,7 +682,7 @@ func readFileTail(fileHandle *os.File, fileSize int64, count, skip int) ([]byte,
 			return nil, fmt.Errorf("reading open file: %w", err)
 		}
 
-		if location != -1 && (char[0] == 10) { //nolint:gomnd
+		if location != -1 && (char[0] == 10) { //nolint:mnd
 			found++ // we found a line
 		}
 
@@ -639,7 +712,7 @@ func readFileHead(fileHandle *os.File, fileSize int64, count, skip int) ([]byte,
 
 	// This is a magic number.
 	// We assume 150 characters per line to optimize the buffer.
-	output.Grow(count * 150) //nolint:gomnd
+	output.Grow(count * 150) //nolint:mnd
 
 	for ; ; location++ {
 		if _, err := fileHandle.Seek(location, io.SeekStart); err != nil {
@@ -650,7 +723,7 @@ func readFileHead(fileHandle *os.File, fileSize int64, count, skip int) ([]byte,
 			return nil, fmt.Errorf("reading open file: %w", err)
 		}
 
-		if char[0] == 10 { //nolint:gomnd
+		if char[0] == 10 { //nolint:mnd
 			found++ // we have a line
 
 			if found <= skip {
@@ -683,14 +756,14 @@ func revBytes(output bytes.Buffer) []byte {
 func (c *Client) getDisks(ctx context.Context) map[string]*snapshot.Partition {
 	output := make(map[string]*snapshot.Partition)
 	snapcnfg := &snapshot.Config{
-		Plugins:   &snapshot.Plugins{},
+		Plugins:   snapshot.Plugins{},
 		DiskUsage: true,
 		AllDrives: true,
 		ZFSPools:  c.Config.Snapshot.ZFSPools,
 		UseSudo:   c.Config.Snapshot.UseSudo,
 		//		Raid:      c.Config.Snapshot.Raid,
 	}
-	snapshot, _, _ := snapcnfg.GetSnapshot(ctx)
+	snapshot, _, _ := snapcnfg.GetSnapshot(ctx, c.Debugf)
 
 	for k, v := range snapshot.DiskUsage {
 		output[k] = v
@@ -705,4 +778,43 @@ func (c *Client) getDisks(ctx context.Context) map[string]*snapshot.Partition {
 	}
 
 	return output
+}
+
+func getGateway() string {
+	gateway, err := gateway.DiscoverGateway()
+	if err != nil {
+		return ""
+	}
+
+	return gateway.String()
+}
+
+// Returns interface name and netmask.
+func getIfNameAndNetmask(ipAddr string) (string, string) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "", ""
+	}
+
+	for _, iface := range ifaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			switch address := addr.(type) {
+			case *net.IPNet:
+				if address.IP.String() == ipAddr {
+					return iface.Name, addr.String()
+				}
+			case *net.IPAddr:
+				if address.IP.String() == ipAddr {
+					return iface.Name, addr.String()
+				}
+			}
+		}
+	}
+
+	return "", ""
 }

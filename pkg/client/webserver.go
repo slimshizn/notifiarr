@@ -9,43 +9,47 @@ import (
 	"net/http"
 	"os"
 	"path"
-	"time"
 
 	"github.com/Notifiarr/notifiarr/pkg/mnd"
 	"github.com/gorilla/mux"
-	apachelog "github.com/lestrrat-go/apache-logformat"
+	apachelog "github.com/lestrrat-go/apache-logformat/v2"
 )
 
 // StartWebServer starts the web server.
-func (c *Client) StartWebServer() {
+func (c *Client) StartWebServer(ctx context.Context) {
 	c.Lock()
 	defer c.Unlock()
 
 	//nolint:lll // Create an apache-style logger.
-	apache, _ := apachelog.New(`%{X-Forwarded-For}i %l %{X-Username}i %t "%m %{X-Redacted-URI}i %H" %>s %b "%{Referer}i" "%{User-agent}i" %{X-Request-Time}i %{ms}Tms`)
+	apache, _ := apachelog.New(`%{X-Forwarded-For}i - %{X-NotiClient-Username}i %t "%m %{X-Redacted-URI}i %H" %>s %b "%{Referer}i" "%{User-agent}i" %{X-Request-Time}i %{ms}Tms`)
+
 	// Create a request router.
 	c.Config.Router = mux.NewRouter()
 	c.Config.Router.Use(c.fixForwardedFor)
 	c.Config.Router.Use(c.countRequest)
 	c.Config.Router.Use(c.addUsernameHeader)
 	c.webauth = c.Config.UIPassword.Webauth() // this needs to be locked since password can be changed without reloading.
+	c.noauth = c.Config.UIPassword.Noauth()
+	c.authHeader = c.Config.UIPassword.Header()
 
 	// Make a multiplexer because websockets can't use apache log.
 	smx := http.NewServeMux()
-	smx.Handle(path.Join(c.Config.URLBase, "/ws"), c.Config.Router)
 	smx.Handle("/", c.stripSecrets(apache.Wrap(c.Config.Router, c.Logger.HTTPLog.Writer())))
+	smx.Handle(path.Join(c.Config.URLBase, "ui", "ws"), c.Config.Router) // websockets cannot go through the apache logger.
 
 	// Create a server.
 	c.server = &http.Server{ //nolint: exhaustivestruct
 		Handler:           smx,
 		Addr:              c.Config.BindAddr,
-		IdleTimeout:       time.Minute,
+		IdleTimeout:       mnd.DefaultTimeout,
 		WriteTimeout:      c.Config.Timeout.Duration,
 		ReadTimeout:       c.Config.Timeout.Duration,
 		ReadHeaderTimeout: c.Config.Timeout.Duration,
 		ErrorLog:          c.Logger.ErrorLog,
 	}
 
+	// Start the Notifiarr.com origin websocket tunnel.
+	c.startTunnel(ctx)
 	// Initialize all the application API paths.
 	c.Config.Apps.InitHandlers()
 	c.httpHandlers()
@@ -60,6 +64,7 @@ func (c *Client) runWebServer() {
 	var err error
 
 	if menu["stat"] != nil {
+		menu["stat"].Enable()
 		menu["stat"].Check()
 		menu["stat"].SetTooltip("web server running, uncheck to pause")
 	}
@@ -78,6 +83,13 @@ func (c *Client) runWebServer() {
 
 // StopWebServer stops the web servers. Panics if that causes an error or timeout.
 func (c *Client) StopWebServer(ctx context.Context) error {
+	c.Lock()
+	defer c.Unlock()
+
+	if c.server == nil {
+		return nil
+	}
+
 	c.Print("==> Stopping Web Server!")
 
 	ctx, cancel := context.WithTimeout(ctx, c.Config.Timeout.Duration)
@@ -88,6 +100,10 @@ func (c *Client) StopWebServer(ctx context.Context) error {
 		menu["stat"].SetTooltip("web server paused, click to start")
 	}
 
+	if c.tunnel != nil {
+		defer c.tunnel.Shutdown()
+	}
+	// Wait for any active requests before shutting down the tunnel.
 	if err := c.server.Shutdown(ctx); err != nil {
 		return fmt.Errorf("shutting down web server: %w", err)
 	}
@@ -124,6 +140,8 @@ func (r *responseWrapper) Write(b []byte) (int, error) {
 func (r *responseWrapper) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	hijack, ok := r.ResponseWriter.(http.Hijacker)
 	if !ok {
+		// This fires if you move the /ui/ws endpoint to another name.
+		// It needs to be updated in two places.
 		panic("cannot hijack connection!")
 	}
 

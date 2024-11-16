@@ -6,10 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime"
+	"io/fs"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/Notifiarr/notifiarr/pkg/bindata"
 	"github.com/Notifiarr/notifiarr/pkg/bindata/docs"
+	"github.com/Notifiarr/notifiarr/pkg/checkapp"
 	"github.com/Notifiarr/notifiarr/pkg/configfile"
 	"github.com/Notifiarr/notifiarr/pkg/logs"
 	"github.com/Notifiarr/notifiarr/pkg/mnd"
@@ -29,9 +29,10 @@ import (
 	"github.com/Notifiarr/notifiarr/pkg/update"
 	"github.com/Notifiarr/notifiarr/pkg/website"
 	"github.com/gorilla/mux"
-	"github.com/gorilla/schema"
-	"github.com/shirou/gopsutil/v3/disk"
+	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/swaggo/swag"
+	"github.com/vearutop/statigz"
+	"golift.io/cnfgfile"
 	"golift.io/version"
 )
 
@@ -45,22 +46,21 @@ import (
 // @BasePath /
 
 const (
-	minPasswordLen   = 9
-	fileSourceLogs   = "logs"
-	fileSourceConfig = "config"
+	minPasswordLen = 9
+	fileSourceLogs = "logs"
 )
 
 // userNameValue is used a context value key.
 type userNameValue int
 
 //nolint:gochecknoglobals // used as context value key.
-var userNameStr interface{} = userNameValue(1)
+var userNameStr = userNameValue(1)
 
 func (c *Client) checkAuthorized(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		userName, dynamic := c.getUserName(request)
 		if userName != "" {
-			ctx := context.WithValue(request.Context(), userNameStr, []interface{}{userName, dynamic})
+			ctx := context.WithValue(request.Context(), userNameStr, []any{userName, dynamic})
 			next.ServeHTTP(response, request.WithContext(ctx))
 		} else {
 			http.Redirect(response, request, c.Config.URLBase, http.StatusFound)
@@ -71,18 +71,22 @@ func (c *Client) checkAuthorized(next http.Handler) http.Handler {
 // getUserName returns the username and a bool if it's dynamic (not the one from the config file).
 func (c *Client) getUserName(request *http.Request) (string, bool) {
 	if userName := request.Context().Value(userNameStr); userName != nil {
-		u, _ := userName.([]interface{})
+		u, _ := userName.([]any)
 		username, _ := u[0].(string)
 		found, _ := u[1].(bool)
 
 		return username, found
 	}
 
-	if userName := request.Header.Get("x-webauth-user"); userName != "" {
+	if c.Config.Allow.Contains(request.RemoteAddr) && c.webauth {
 		// If the upstream is allowed and gave us a username header, use it.
-		ip := strings.Trim(request.RemoteAddr[:strings.LastIndex(request.RemoteAddr, ":")], "[]")
-		if c.Config.Allow.Contains(ip) {
+		if userName := request.Header.Get(c.authHeader); userName != "" {
 			return userName, true
+		}
+
+		// If the upstream IP is allowed and no auth is enabled, set a username.
+		if c.noauth { // c.webauth is always true if c.noauth is true.
+			return configfile.DefaultUsername, true
 		}
 	}
 
@@ -157,20 +161,12 @@ func (c *Client) logoutHandler(response http.ResponseWriter, request *http.Reque
 
 // getFileDeleteHandler deletes log and config files.
 func (c *Client) getFileDeleteHandler(response http.ResponseWriter, req *http.Request) {
-	var fileInfos *logs.LogFileInfos
-
-	backupPath := filepath.Join(filepath.Dir(c.Flags.ConfigFile), "backups", filepath.Base(c.Flags.ConfigFile))
-
-	switch mux.Vars(req)["source"] {
-	case fileSourceLogs:
-		fileInfos = c.Logger.GetAllLogFilePaths()
-	case fileSourceConfig:
-		fileInfos = logs.GetFilePaths(c.Flags.ConfigFile, backupPath)
-	default:
+	if mux.Vars(req)["source"] != fileSourceLogs {
 		http.Error(response, "invalid source", http.StatusBadRequest)
 		return
 	}
 
+	fileInfos := c.Logger.GetAllLogFilePaths()
 	id := mux.Vars(req)["id"]
 
 	for _, fileInfo := range fileInfos.List {
@@ -195,22 +191,35 @@ func (c *Client) getFileDeleteHandler(response http.ResponseWriter, req *http.Re
 	}
 }
 
-// getFileDownloadHandler downloads config and log files.
-func (c *Client) getFileDownloadHandler(response http.ResponseWriter, req *http.Request) {
-	var fileInfos *logs.LogFileInfos
-
-	switch mux.Vars(req)["source"] {
-	case fileSourceLogs:
-		fileInfos = c.Logger.GetAllLogFilePaths()
-	case fileSourceConfig:
-		fileInfos = logs.GetFilePaths(c.Flags.ConfigFile)
-	default:
+// uploadFileHandler uploads a log file to notifiarr.com.
+func (c *Client) uploadFileHandler(response http.ResponseWriter, req *http.Request) {
+	if mux.Vars(req)["source"] != fileSourceLogs {
 		http.Error(response, "invalid source", http.StatusBadRequest)
 		return
 	}
 
 	id := mux.Vars(req)["id"]
-	for _, fileInfo := range fileInfos.List {
+	for _, fileInfo := range c.Logger.GetAllLogFilePaths().List {
+		if fileInfo.ID != id {
+			continue
+		}
+
+		err := c.triggers.FileUpload.Upload(website.EventGUI, fileInfo.Path)
+		if err != nil {
+			http.Error(response, err.Error(), http.StatusInternalServerError)
+		}
+
+		user, _ := c.getUserName(req)
+		c.Printf("[gui '%s' requested] Uploaded file: %s", user, fileInfo.Path)
+
+		return
+	}
+}
+
+// getFileDownloadHandler downloads log files to the browser.
+func (c *Client) getFileDownloadHandler(response http.ResponseWriter, req *http.Request) {
+	id := mux.Vars(req)["id"]
+	for _, fileInfo := range c.Logger.GetAllLogFilePaths().List {
 		if fileInfo.ID != id {
 			continue
 		}
@@ -253,12 +262,16 @@ func (c *Client) handleShutdown(response http.ResponseWriter, _ *http.Request) {
 }
 
 func (c *Client) handleReload(response http.ResponseWriter, _ *http.Request) {
+	c.reloadAppNow()
+	http.Error(response, "OK", http.StatusOK)
+}
+
+func (c *Client) reloadAppNow() {
 	c.Lock()
 	c.reloading = true
 	c.Unlock()
 
 	defer c.triggerConfigReload(website.EventGUI, "GUI Requested")
-	http.Error(response, "OK", http.StatusOK)
 }
 
 func (c *Client) handlePing(response http.ResponseWriter, _ *http.Request) {
@@ -308,8 +321,6 @@ func (c *Client) getFileHandler(response http.ResponseWriter, req *http.Request)
 	switch mux.Vars(req)["source"] {
 	case fileSourceLogs:
 		fileInfos = c.Logger.GetAllLogFilePaths()
-	case fileSourceConfig:
-		fileInfos = logs.GetFilePaths(c.Flags.ConfigFile)
 	default:
 		http.Error(response, "invalid source", http.StatusBadRequest)
 		return
@@ -343,18 +354,51 @@ func (c *Client) getFileHandler(response http.ResponseWriter, req *http.Request)
 }
 
 func (c *Client) handleProfilePost(response http.ResponseWriter, request *http.Request) {
-	currUser, dynamic := c.getUserName(request)
-	if dynamic {
-		http.Error(response, "Dynamic accounts cannot make profile changes.", http.StatusBadRequest)
+	var (
+		currPass          = request.PostFormValue("Password")
+		authType          = request.PostFormValue("AuthType")
+		authHeader        = request.PostFormValue("AuthHeader")
+		currUser, dynamic = c.getUserName(request)
+	)
+
+	if !dynamic {
+		// If the auth is currently using a password, check the password.
+		if !c.checkUserPass(currUser, currPass) {
+			http.Error(response, "Invalid existing (current) password provided.", http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Upstreams is only read on reload, but this is still not thread safe
+	// because two people could click save at the same time.
+	c.Lock()
+	c.Config.Upstreams = strings.Fields(request.PostFormValue("Upstreams"))
+	c.Unlock()
+
+	if authType == "password" {
+		c.handleProfilePostPassword(response, request)
 		return
 	}
 
+	switch err := c.setUserPass(request.Context(), authType, authHeader, ""); {
+	case err != nil:
+		c.Errorf("[gui '%s' requested] Saving Config: %v", currUser, err)
+		http.Error(response, "Saving Config: "+err.Error(), http.StatusInternalServerError)
+	case authType == "nopass":
+		c.Printf("[gui '%s' requested] Disabled WebUI authentication.", currUser)
+		http.Error(response, "Disabled WebUI authentication.", http.StatusOK)
+		c.reloadAppNow()
+	default:
+		c.Printf("[gui '%s' requested] Enabled WebUI proxy authentication, header: %s", currUser, authHeader)
+		c.setSession(request.Header.Get(authHeader), response)
+		http.Error(response, "Enabled WebUI proxy authentication. Header: "+authHeader, http.StatusOK)
+		c.reloadAppNow()
+	}
+}
+
+func (c *Client) handleProfilePostPassword(response http.ResponseWriter, request *http.Request) {
 	currPass := request.PostFormValue("Password")
-
-	if !c.checkUserPass(currUser, currPass) {
-		http.Error(response, "Invalid existing (current) password provided.", http.StatusBadRequest)
-		return
-	}
+	currUser, _ := c.getUserName(request)
 
 	username := request.PostFormValue("NewUsername")
 	if username == "" {
@@ -372,25 +416,21 @@ func (c *Client) handleProfilePost(response http.ResponseWriter, request *http.R
 		return
 	}
 
-	if newPassw == currPass && username == currUser {
-		http.Error(response, "Values unchanged. Nothing to save.", http.StatusOK)
-		return
-	}
-
-	if err := c.setUserPass(request.Context(), username, newPassw); err != nil {
-		c.Errorf("[gui '%s' requested] Saving Config: %v", currUser, err)
-		http.Error(response, "Saving Config: "+err.Error(), http.StatusInternalServerError)
+	if err := c.setUserPass(request.Context(), "password", username, newPassw); err != nil {
+		c.Errorf("[gui '%s' requested] Saving Trust Profile: %v", currUser, err)
+		http.Error(response, "Saving Trust Profile: "+err.Error(), http.StatusInternalServerError)
 
 		return
 	}
 
-	c.Printf("[gui '%s' requested] Updated primary username and password, new username: %s", currUser, username)
+	c.Printf("[gui '%s' requested] Updated Trust Profile settings, username: %s", currUser, username)
 	c.setSession(username, response)
-	http.Error(response, "New username and/or password saved.", http.StatusOK)
+	http.Error(response, "Trust Profile saved.", http.StatusOK)
+	c.reloadAppNow()
 }
 
 func (c *Client) handleInstanceCheck(response http.ResponseWriter, request *http.Request) {
-	configPostDecoder.RegisterConverter([]string{}, func(input string) reflect.Value {
+	mnd.ConfigPostDecoder.RegisterConverter([]string{}, func(input string) reflect.Value {
 		return reflect.ValueOf(strings.Fields(input))
 	})
 
@@ -399,7 +439,7 @@ func (c *Client) handleInstanceCheck(response http.ResponseWriter, request *http
 		return
 	}
 
-	c.testInstance(response, request)
+	checkapp.Test(c.Config, response, request)
 }
 
 // handleFileBrowser returns a list of files and folders in a path.
@@ -619,7 +659,7 @@ func (c *Client) saveNewConfig(ctx context.Context, config *configfile.Config) e
 
 	// write new config file to temporary path.
 	destFile := filepath.Join(filepath.Dir(c.Flags.ConfigFile), "_tmpConfig."+date)
-	if _, err := config.Write(ctx, destFile); err != nil { // write our config file template.
+	if _, err := config.Write(ctx, destFile, true); err != nil { // write our config file template.
 		return fmt.Errorf("writing new config file: %w", err)
 	}
 
@@ -631,13 +671,9 @@ func (c *Client) saveNewConfig(ctx context.Context, config *configfile.Config) e
 	return nil
 }
 
-// Set a Decoder instance as a package global, because it caches
-// meta-data about structs, and an instance can be shared safely.
-var configPostDecoder = schema.NewDecoder() //nolint:gochecknoglobals
-
 func (c *Client) mergeAndValidateNewConfig(config *configfile.Config, request *http.Request) error {
 	// This turns text fields into a []string (extra keys and upstreams use this).
-	configPostDecoder.RegisterConverter([]string{}, func(input string) reflect.Value {
+	mnd.ConfigPostDecoder.RegisterConverter([]string{}, func(input string) reflect.Value {
 		return reflect.ValueOf(strings.Fields(input))
 	})
 
@@ -647,10 +683,6 @@ func (c *Client) mergeAndValidateNewConfig(config *configfile.Config, request *h
 
 	if config.Snapshot == nil {
 		config.Snapshot = &snapshot.Config{}
-	}
-
-	if config.Snapshot.Plugins == nil {
-		config.Snapshot.Plugins = &snapshot.Plugins{}
 	}
 
 	if config.Apps != nil {
@@ -667,28 +699,50 @@ func (c *Client) mergeAndValidateNewConfig(config *configfile.Config, request *h
 		config.Apps.Tautulli = nil
 	}
 
+	config.SSLCrtFile = ""
+	config.SSLKeyFile = ""
 	config.Plex = nil
 	config.WatchFiles = nil
 	config.Commands = nil
 	config.Service = nil
 	config.Snapshot.Plugins.MySQL = nil
+	config.Snapshot.Plugins.Nvidia = nil
 
-	if err := configPostDecoder.Decode(config, request.PostForm); err != nil {
+	// for k, v := range request.PostForm {
+	// 	c.Errorf("Config Post: %s = %+v", k, v)
+	// }
+
+	// Decode the POST'd data directly into the mostly-empty config struct.
+	if err := mnd.ConfigPostDecoder.Decode(config, request.PostForm); err != nil {
 		return fmt.Errorf("decoding POST data into Go data structure failed: %w", err)
 	}
 
-	if err := c.validateNewCommandConfig(config); err != nil {
-		return err
-	}
-
-	return c.validateNewServiceConfig(config)
+	return c.validateNewConfig(config)
 }
 
-func (c *Client) validateNewCommandConfig(config *configfile.Config) error {
+func (c *Client) validateNewConfig(config *configfile.Config) error {
 	for idx, cmd := range config.Commands {
 		if err := cmd.SetupRegexpArgs(); err != nil {
 			return fmt.Errorf("command %d '%s' failed setup: %w", idx+1, cmd.Name, err)
 		}
+	}
+
+	if err := c.validateNewServiceConfig(config); err != nil {
+		return err
+	}
+
+	copied, err := config.CopyConfig()
+	if err != nil {
+		return fmt.Errorf("copying config: %w", err)
+	}
+
+	_, err = cnfgfile.Parse(copied, &cnfgfile.Opts{
+		Name:          mnd.Title,
+		TransformPath: configfile.ExpandHomedir,
+		Prefix:        "filepath:",
+	})
+	if err != nil {
+		return fmt.Errorf("filepath: %w", err)
 	}
 
 	return nil
@@ -729,7 +783,7 @@ func (c *Client) validateNewServiceConfig(config *configfile.Config) error {
 }
 
 func (c *Client) indexPage(ctx context.Context, response http.ResponseWriter, request *http.Request, msg string) {
-	response.Header().Add("content-type", "text/html")
+	response.Header().Add("Content-Type", "text/html")
 
 	user, _ := c.getUserName(request)
 	if request.Method != http.MethodGet || (user == "" && c.webauth) {
@@ -776,43 +830,20 @@ func (c *Client) handleSwaggerIndex(response http.ResponseWriter, request *http.
 	c.renderTemplate(request.Context(), response, request, "swagger/index.html", "")
 }
 
-// handleStaticAssets checks for a file on disk then falls back to compiled-in files.
-func (c *Client) handleStaticAssets(response http.ResponseWriter, request *http.Request) {
-	if request.URL.Path == "/files/css/custom.css" {
-		if cssFileDir := c.haveCustomFile("custom.css"); cssFileDir != "" {
+func (c *Client) handleStaticAssets(resp http.ResponseWriter, req *http.Request) {
+	if req.URL.Path == "/files/css/custom.css" {
+		if cssFile := c.haveCustomFile("custom.css"); cssFile != "" {
 			// custom css file exists on disk, use http.FileServer to serve the dir it's in.
-			http.StripPrefix("/files/css", http.FileServer(http.Dir(filepath.Dir(cssFileDir)))).ServeHTTP(response, request)
+			http.StripPrefix("/files/css", http.FileServer(http.Dir(filepath.Dir(cssFile)))).ServeHTTP(resp, req)
 			return
 		}
 	}
 
+	internalServer := statigz.FileServer(bindata.Files)
 	if c.Flags.Assets == "" {
-		c.handleInternalAsset(response, request)
-		return
-	}
-
-	// get the absolute path to prevent directory traversal
-	f, err := filepath.Abs(filepath.Join(c.Flags.Assets, request.URL.Path))
-	if _, err2 := os.Stat(f); err != nil || err2 != nil { // Check if it exists.
-		c.handleInternalAsset(response, request)
-		return
-	}
-
-	// file exists on disk, use http.FileServer to serve the static dir it's in.
-	http.FileServer(http.Dir(c.Flags.Assets)).ServeHTTP(response, request)
-}
-
-func (c *Client) handleInternalAsset(response http.ResponseWriter, request *http.Request) {
-	data, err := bindata.Asset(request.URL.Path[1:])
-	if err != nil {
-		http.Error(response, err.Error(), http.StatusNotFound)
-		return
-	}
-
-	mime := mime.TypeByExtension(path.Ext(request.URL.Path))
-	response.Header().Set("content-type", mime)
-
-	if _, err = response.Write(data); err != nil {
-		c.Errorf("Writing HTTP Response: %v", err)
+		internalServer.ServeHTTP(resp, req)
+	} else {
+		statigz.FileServer(os.DirFS(c.Flags.Assets).(fs.ReadDirFS), //nolint:forcetypeassert // This is OK!
+			statigz.OnNotFound(internalServer.ServeHTTP)).ServeHTTP(resp, req)
 	}
 }

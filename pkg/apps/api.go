@@ -37,13 +37,13 @@ func (a *Apps) HandleAPIpath(app starr.App, uri string, api APIHandler, method .
 
 	uri = path.Join(a.URLBase, "api", app.Lower(), id, uri)
 
-	return a.Router.Handle(uri, a.CheckAPIKey(a.handleAPI(app, api))).Methods(method...)
+	return a.Router.Handle(uri, a.CheckAPIKey(a.compress(a.handleAPI(app, api)))).Methods(method...)
 }
 
 // This grabs the app struct and saves it in a context before calling the handler.
 // The purpose of this complicated monster is to keep API handler methods simple.
-func (a *Apps) handleAPI(app starr.App, api APIHandler) http.HandlerFunc { //nolint:cyclop,funlen,gocognit
-	return func(w http.ResponseWriter, r *http.Request) { //nolint:varnamelen
+func (a *Apps) handleAPI(app starr.App, api APIHandler) http.HandlerFunc { //nolint:cyclop,funlen
+	return func(resp http.ResponseWriter, r *http.Request) { //nolint:varnamelen
 		var (
 			msg     interface{}
 			ctx     = r.Context()
@@ -92,19 +92,22 @@ func (a *Apps) handleAPI(app starr.App, api APIHandler) http.HandlerFunc { //nol
 			code, msg = api(r.WithContext(context.WithValue(ctx, app, aID)))
 		}
 
-		if len(post) > 0 {
-			s, _ := json.MarshalIndent(msg, "", " ")
-			a.Debugf("Incoming API: %s %s: %s\nStatus: %d, Reply: %s", r.Method, r.URL, string(post), code, s)
+		wrote := a.Respond(resp, code, msg)
+
+		if str, _ := json.MarshalIndent(msg, "", " "); len(post) > 0 {
+			a.Debugf("Incoming API: %s %s (%s): %s\nStatus: %d, Reply (%s): %s",
+				r.Method, r.URL, mnd.FormatBytes(len(post)), string(post), code, mnd.FormatBytes(wrote), str)
+		} else {
+			a.Debugf("Incoming API: %s %s, Status: %d, Reply (%s): %s", r.Method, r.URL, code, mnd.FormatBytes(wrote), str)
 		}
 
 		if appName == "" {
 			appName = "Non-App"
 		}
 
-		wrote := a.Respond(w, code, msg)
-		mnd.APIHits.Add(appName+" Bytes Sent", wrote)
-		mnd.APIHits.Add(appName+" Bytes Received", int64(len(post)))
-		mnd.APIHits.Add(appName+" Requests", 1)
+		mnd.APIHits.Add(appName+mnd.BytesSent, wrote)
+		mnd.APIHits.Add(appName+mnd.BytesReceived, int64(len(post)))
+		mnd.APIHits.Add(appName+mnd.Requests, 1)
 		mnd.APIHits.Add("Total", 1)
 		r.Header.Set("X-Request-Time", fmt.Sprintf("%dms", time.Since(start).Milliseconds()))
 	}
@@ -113,7 +116,7 @@ func (a *Apps) handleAPI(app starr.App, api APIHandler) http.HandlerFunc { //nol
 // CheckAPIKey drops a 403 if the API key doesn't match, otherwise run next handler.
 func (a *Apps) CheckAPIKey(next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) { //nolint:varnamelen
-		if _, ok := a.keys[r.Header.Get("X-API-Key")]; !ok {
+		if _, ok := a.keys[r.Header.Get("X-Api-Key")]; !ok {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}

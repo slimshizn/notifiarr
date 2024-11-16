@@ -11,6 +11,7 @@ import (
 
 	"github.com/Notifiarr/notifiarr/pkg/mnd"
 	"github.com/gorilla/mux"
+	"golang.org/x/time/rate"
 	"golift.io/starr"
 	"golift.io/starr/debuglog"
 	"golift.io/starr/lidarr"
@@ -27,7 +28,16 @@ func (a *Apps) lidarrHandlers() {
 	a.HandleAPIpath(starr.Lidarr, "/check/{mbid:[-a-z0-9]+}", lidarrCheckAlbum, "GET")
 	a.HandleAPIpath(starr.Lidarr, "/get/{albumid:[0-9]+}", lidarrGetAlbum, "GET")
 	a.HandleAPIpath(starr.Lidarr, "/metadataProfiles", lidarrMetadata, "GET")
-	a.HandleAPIpath(starr.Lidarr, "/qualityDefinitions", lidarrQualityDefs, "GET")
+	a.HandleAPIpath(starr.Lidarr, "/naming", lidarrGetNaming, "GET")
+	a.HandleAPIpath(starr.Lidarr, "/naming", lidarrUpdateNaming, "PUT")
+	a.HandleAPIpath(starr.Lidarr, "/customformats", lidarrGetCustomFormats, "GET")
+	a.HandleAPIpath(starr.Lidarr, "/customformats", lidarrAddCustomFormat, "POST")
+	a.HandleAPIpath(starr.Lidarr, "/customformats", lidarrUpdateCustomFormat, "PUT")
+	a.HandleAPIpath(starr.Lidarr, "/customformats/{cfid:[0-9]+}", lidarrUpdateCustomFormat, "PUT")
+	a.HandleAPIpath(starr.Lidarr, "/customformats/{cfid:[0-9]+}", lidarrDeleteCustomFormat, "DELETE")
+	a.HandleAPIpath(starr.Lidarr, "/customformats/all", lidarrDeleteAllCustomFormats, "DELETE")
+	a.HandleAPIpath(starr.Lidarr, "/qualitydefinition", lidarrUpdateQualityDefinition, "PUT")
+	a.HandleAPIpath(starr.Lidarr, "/qualityDefinitions", lidarrGetQualityDefinitions, "GET")
 	a.HandleAPIpath(starr.Lidarr, "/qualityProfiles", lidarrQualityProfiles, "GET")
 	a.HandleAPIpath(starr.Lidarr, "/qualityProfile", lidarrGetQualityProfile, "GET")
 	a.HandleAPIpath(starr.Lidarr, "/qualityProfile", lidarrAddQualityProfile, "POST")
@@ -43,19 +53,19 @@ func (a *Apps) lidarrHandlers() {
 	a.HandleAPIpath(starr.Lidarr, "/notification", lidarrGetNotifications, "GET")
 	a.HandleAPIpath(starr.Lidarr, "/notification", lidarrUpdateNotification, "PUT")
 	a.HandleAPIpath(starr.Lidarr, "/notification", lidarrAddNotification, "POST")
+	a.HandleAPIpath(starr.Lidarr, "/queue/{queueID}", lidarrDeleteQueue, "DELETE")
 }
 
 // LidarrConfig represents the input data for a Lidarr server.
 type LidarrConfig struct {
-	extraConfig
+	ExtraConfig
 	*starr.Config
-	*lidarr.Lidarr `toml:"-" xml:"-" json:"-"`
-	errorf         func(string, ...interface{}) `toml:"-" xml:"-" json:"-"`
+	*lidarr.Lidarr `json:"-" toml:"-" xml:"-"`
+	errorf         func(string, ...interface{}) `json:"-" toml:"-" xml:"-"`
 }
 
-func getLidarr(r *http.Request) *lidarr.Lidarr {
-	app, _ := r.Context().Value(starr.Lidarr).(*LidarrConfig)
-	return app.Lidarr
+func getLidarr(r *http.Request) *LidarrConfig {
+	return r.Context().Value(starr.Lidarr).(*LidarrConfig) //nolint:forcetypeassert
 }
 
 // Enabled returns true if the Lidarr instance is enabled and usable.
@@ -76,6 +86,7 @@ func (a *Apps) setupLidarr() error {
 				MaxBody: a.MaxBody,
 				Debugf:  a.Debugf,
 				Caller:  metricMakerCallback(string(starr.Lidarr)),
+				Redact:  []string{app.APIKey, app.Password, app.HTTPPass},
 			})
 		} else {
 			app.Config.Client = starr.Client(app.Timeout.Duration, app.ValidSSL)
@@ -85,6 +96,10 @@ func (a *Apps) setupLidarr() error {
 		app.errorf = a.Errorf
 		app.URL = strings.TrimRight(app.URL, "/")
 		app.Lidarr = lidarr.New(app.Config)
+
+		if app.Deletes > 0 {
+			app.delLimit = rate.NewLimiter(rate.Every(1*time.Hour/time.Duration(app.Deletes)), app.Deletes)
+		}
 	}
 
 	return nil
@@ -111,22 +126,22 @@ func lidarrAddAlbum(req *http.Request) (int, interface{}) {
 
 	err := json.NewDecoder(req.Body).Decode(&payload)
 	if err != nil {
-		return http.StatusBadRequest, fmt.Errorf("decoding payload: %w", err)
+		return apiError(http.StatusBadRequest, "decoding payload", err)
 	} else if payload.ForeignAlbumID == "" {
-		return http.StatusUnprocessableEntity, fmt.Errorf("0: %w", ErrNoMBID)
+		return apiError(http.StatusUnprocessableEntity, "0", ErrNoMBID)
 	}
 
 	// Check for existing album.
 	m, err := getLidarr(req).GetAlbumContext(req.Context(), payload.ForeignAlbumID)
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("checking album: %w", err)
+		return apiError(http.StatusServiceUnavailable, "checking album", err)
 	} else if len(m) > 0 {
 		return http.StatusConflict, lidarrData(m[0])
 	}
 
 	album, err := getLidarr(req).AddAlbumContext(req.Context(), &payload)
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("adding album: %w", err)
+		return apiError(http.StatusInternalServerError, "adding album", err)
 	}
 
 	return http.StatusCreated, album
@@ -148,7 +163,7 @@ func lidarrGetArtist(req *http.Request) (int, interface{}) {
 
 	artist, err := getLidarr(req).GetArtistByIDContext(req.Context(), artistID)
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("checking artist: %w", err)
+		return apiError(http.StatusServiceUnavailable, "checking artist", err)
 	}
 
 	return http.StatusOK, artist
@@ -173,7 +188,7 @@ func lidarrData(album *lidarr.Album) map[string]interface{} {
 // @Tags         Lidarr
 // @Produce      json
 // @Param        instance  path   int64  true  "instance ID"
-// @Param        mbid  path   int64  true  "movie brains ID"
+// @Param        mbid  path   int64  true  "music brains ID"
 // @Success      200  {object} apps.Respond.apiResponse{message=string} "not found"
 // @Failure      409  {object} apps.Respond.apiResponse{message=string} "already exists"
 // @Failure      503  {object} apps.Respond.apiResponse{message=string} "instance error"
@@ -185,7 +200,7 @@ func lidarrCheckAlbum(req *http.Request) (int, interface{}) {
 
 	m, err := getLidarr(req).GetAlbumContext(req.Context(), id)
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("checking album: %w", err)
+		return apiError(http.StatusServiceUnavailable, "checking album", err)
 	} else if len(m) > 0 {
 		return http.StatusConflict, lidarrData(m[0])
 	}
@@ -209,7 +224,7 @@ func lidarrGetAlbum(req *http.Request) (int, interface{}) {
 
 	album, err := getLidarr(req).GetAlbumByIDContext(req.Context(), albumID)
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("checking album: %w", err)
+		return apiError(http.StatusServiceUnavailable, "checking album", err)
 	}
 
 	return http.StatusOK, album
@@ -234,7 +249,7 @@ func lidarrTriggerSearchAlbum(req *http.Request) (int, interface{}) {
 		AlbumIDs: []int64{albumID},
 	})
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("triggering album search: %w", err)
+		return apiError(http.StatusServiceUnavailable, "triggering album search", err)
 	}
 
 	return http.StatusOK, output.Status
@@ -253,7 +268,7 @@ func lidarrTriggerSearchAlbum(req *http.Request) (int, interface{}) {
 func lidarrMetadata(req *http.Request) (int, interface{}) {
 	profiles, err := getLidarr(req).GetMetadataProfilesContext(req.Context())
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("getting profiles: %w", err)
+		return apiError(http.StatusInternalServerError, "getting profiles", err)
 	}
 
 	// Format profile ID=>Name into a nice map.
@@ -263,6 +278,217 @@ func lidarrMetadata(req *http.Request) (int, interface{}) {
 	}
 
 	return http.StatusOK, p
+}
+
+// @Description  Returns Lidarr track naming conventions.
+// @Summary      Retrieve Lidarr Track Naming
+// @Tags         Lidarr
+// @Produce      json
+// @Param        instance  path   int64  true  "instance ID"
+// @Success      200  {object} apps.Respond.apiResponse{message=lidarr.Naming} "naming conventions"
+// @Failure      500  {object} apps.Respond.apiResponse{message=string} "instance error"
+// @Failure      404  {object} string "bad token or api key"
+// @Router       /api/lidarr/{instance}/naming [get]
+// @Security     ApiKeyAuth
+func lidarrGetNaming(req *http.Request) (int, interface{}) {
+	naming, err := getLidarr(req).GetNamingContext(req.Context())
+	if err != nil {
+		return apiError(http.StatusInternalServerError, "getting naming", err)
+	}
+
+	return http.StatusOK, naming
+}
+
+// @Description  Updates the Lidarr track naming conventions.
+// @Summary      Update Lidarr Track Naming
+// @Tags         Lidarr
+// @Produce      json
+// @Accept       json
+// @Param        PUT body lidarr.Naming  true  "naming conventions"
+// @Success      200  {object} apps.Respond.apiResponse{message=int64} "naming ID"
+// @Failure      400  {object} apps.Respond.apiResponse{message=string} "bad json input"
+// @Failure      500  {object} apps.Respond.apiResponse{message=string} "instance error"
+// @Failure      404  {object} string "bad token or api key"
+// @Router       /api/lidarr/{instance}/naming [put]
+// @Security     ApiKeyAuth
+func lidarrUpdateNaming(req *http.Request) (int, interface{}) {
+	var naming lidarr.Naming
+
+	err := json.NewDecoder(req.Body).Decode(&naming)
+	if err != nil {
+		return apiError(http.StatusBadRequest, "decoding payload", err)
+	}
+
+	output, err := getLidarr(req).UpdateNamingContext(req.Context(), &naming)
+	if err != nil {
+		return apiError(http.StatusServiceUnavailable, "updating naming", err)
+	}
+
+	return http.StatusOK, output.ID
+}
+
+// @Description  Creates a new Custom Format in Lidarr.
+// @Summary      Create Lidarr Custom Format
+// @Tags         Lidarr
+// @Produce      json
+// @Accept       json
+// @Param        instance  path   int64  true  "instance ID"
+// @Param        POST body lidarr.CustomFormatInput  true  "New Custom Format content"
+// @Success      200  {object} apps.Respond.apiResponse{message=lidarr.CustomFormatOutput}  "custom format"
+// @Failure      400  {object} apps.Respond.apiResponse{message=string} "invalid json provided"
+// @Failure      500  {object} apps.Respond.apiResponse{message=string} "instance error"
+// @Failure      404  {object} string "bad token or api key"
+// @Router       /api/lidarr/{instance}/customformats [post]
+// @Security     ApiKeyAuth
+func lidarrAddCustomFormat(req *http.Request) (int, interface{}) {
+	var cusform lidarr.CustomFormatInput
+
+	err := json.NewDecoder(req.Body).Decode(&cusform)
+	if err != nil {
+		return apiError(http.StatusBadRequest, "decoding payload", err)
+	}
+
+	resp, err := getLidarr(req).AddCustomFormatContext(req.Context(), &cusform)
+	if err != nil {
+		return apiError(http.StatusInternalServerError, "adding custom format", err)
+	}
+
+	return http.StatusOK, resp
+}
+
+// @Description  Returns all Custom Formats Data from Lidarr.
+// @Summary      Get Lidarr Custom Formats Data
+// @Tags         Lidarr
+// @Produce      json
+// @Param        instance  path   int64  true  "instance ID"
+// @Success      200  {object} apps.Respond.apiResponse{message=[]lidarr.CustomFormatOutput}  "custom formats"
+// @Failure      500  {object} apps.Respond.apiResponse{message=string} "instance error"
+// @Failure      404  {object} string "bad token or api key"
+// @Router       /api/lidarr/{instance}/customformats [get]
+// @Security     ApiKeyAuth
+func lidarrGetCustomFormats(req *http.Request) (int, interface{}) {
+	cusform, err := getLidarr(req).GetCustomFormatsContext(req.Context())
+	if err != nil {
+		return apiError(http.StatusInternalServerError, "getting custom formats", err)
+	}
+
+	return http.StatusOK, cusform
+}
+
+// @Description  Updates a Custom Format in Lidarr.
+// @Summary      Update Lidarr Custom Format
+// @Tags         Lidarr
+// @Produce      json
+// @Accept       json
+// @Param        instance  path   int64  true  "instance ID"
+// @Param        PUT body lidarr.CustomFormatInput  true  "Updated Custom Format content"
+// @Success      200  {object} apps.Respond.apiResponse{message=lidarr.CustomFormatOutput}  "custom format"
+// @Failure      400  {object} apps.Respond.apiResponse{message=string} "invalid json provided"
+// @Failure      500  {object} apps.Respond.apiResponse{message=string} "instance error"
+// @Failure      404  {object} string "bad token or api key"
+// @Router       /api/lidarr/{instance}/customformats/{formatID} [put]
+// @Security     ApiKeyAuth
+func lidarrUpdateCustomFormat(req *http.Request) (int, interface{}) {
+	var cusform lidarr.CustomFormatInput
+	if err := json.NewDecoder(req.Body).Decode(&cusform); err != nil {
+		return apiError(http.StatusBadRequest, "decoding payload", err)
+	}
+
+	output, err := getLidarr(req).UpdateCustomFormatContext(req.Context(), &cusform)
+	if err != nil {
+		return apiError(http.StatusInternalServerError, "updating custom format", err)
+	}
+
+	return http.StatusOK, output
+}
+
+// @Description  Delete a Custom Format from Lidarr.
+// @Summary      Delete Lidarr Custom Format
+// @Tags         Lidarr
+// @Produce      json
+// @Param        instance  path   int64  true  "instance ID"
+// @Param        formatID  path   int64  true  "Custom Format ID"
+// @Success      200  {object} apps.Respond.apiResponse{message=string}  "ok"
+// @Failure      500  {object} apps.Respond.apiResponse{message=string} "instance error"
+// @Failure      404  {object} string "bad token or api key"
+// @Router       /api/lidarr/{instance}/customformats/{formatID} [delete]
+// @Security     ApiKeyAuth
+func lidarrDeleteCustomFormat(req *http.Request) (int, interface{}) {
+	cfID, _ := strconv.ParseInt(mux.Vars(req)["cfid"], mnd.Base10, mnd.Bits64)
+
+	err := getLidarr(req).DeleteCustomFormatContext(req.Context(), cfID)
+	if err != nil {
+		return apiError(http.StatusInternalServerError, "deleting custom format", err)
+	}
+
+	return http.StatusOK, "OK"
+}
+
+// @Description  Delete all Custom Formats from Lidarr.
+// @Summary      Delete all Lidarr Custom Formats
+// @Tags         Lidarr
+// @Produce      json
+// @Param        instance  path   int64  true  "instance ID"
+// @Success      200  {object} apps.Respond.apiResponse{message=apps.deleteResponse}  "item delete counters"
+// @Failure      500  {object} apps.Respond.apiResponse{message=string} "instance error"
+// @Failure      404  {object} string "bad token or api key"
+// @Router       /api/lidarr/{instance}/customformats/all [delete]
+// @Security     ApiKeyAuth
+func lidarrDeleteAllCustomFormats(req *http.Request) (int, interface{}) {
+	formats, err := getLidarr(req).GetCustomFormatsContext(req.Context())
+	if err != nil {
+		return apiError(http.StatusInternalServerError, "getting custom formats", err)
+	}
+
+	var (
+		deleted int
+		errs    []string
+	)
+
+	for _, format := range formats {
+		err := getLidarr(req).DeleteCustomFormatContext(req.Context(), format.ID)
+		if err != nil {
+			errs = append(errs, err.Error())
+			continue
+		}
+
+		deleted++
+	}
+
+	return http.StatusOK, &deleteResponse{
+		Found:   len(formats),
+		Deleted: deleted,
+		Errors:  errs,
+	}
+}
+
+// @Description  Updates all Quality Definitions in Lidarr.
+// @Summary      Update Lidarr Quality Definitions
+// @Tags         Lidarr
+// @Produce      json
+// @Accept       json
+// @Param        instance  path   int64  true  "instance ID"
+// @Param        PUT body []lidarr.QualityDefinition  true  "Updated quality definitions"
+// @Success      200  {object} apps.Respond.apiResponse{message=[]lidarr.QualityDefinition}  "quality definitions return"
+// @Failure      400  {object} apps.Respond.apiResponse{message=string} "invalid json provided"
+// @Failure      500  {object} apps.Respond.apiResponse{message=string} "instance error"
+// @Failure      404  {object} string "bad token or api key"
+// @Router       /api/lidarr/{instance}/qualitydefinition [put]
+// @Security     ApiKeyAuth
+//
+//nolint:lll
+func lidarrUpdateQualityDefinition(req *http.Request) (int, interface{}) {
+	var input []*lidarr.QualityDefinition
+	if err := json.NewDecoder(req.Body).Decode(&input); err != nil {
+		return apiError(http.StatusBadRequest, "decoding payload", err)
+	}
+
+	output, err := getLidarr(req).UpdateQualityDefinitionsContext(req.Context(), input)
+	if err != nil {
+		return apiError(http.StatusInternalServerError, "updating quality definition", err)
+	}
+
+	return http.StatusOK, output
 }
 
 // @Description  Fetches all Quality Definitions from Lidarr.
@@ -275,11 +501,11 @@ func lidarrMetadata(req *http.Request) (int, interface{}) {
 // @Failure      404  {object} string "bad token or api key"
 // @Router       /api/lidarr/{instance}/qualityDefinitions [get]
 // @Security     ApiKeyAuth
-func lidarrQualityDefs(req *http.Request) (int, interface{}) {
+func lidarrGetQualityDefinitions(req *http.Request) (int, interface{}) {
 	// Get the profiles from lidarr.
-	definitions, err := getLidarr(req).GetQualityDefinitionContext(req.Context())
+	definitions, err := getLidarr(req).GetQualityDefinitionsContext(req.Context())
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("getting profiles: %w", err)
+		return apiError(http.StatusInternalServerError, "getting profiles", err)
 	}
 
 	// Format definitions ID=>Title into a nice map.
@@ -305,7 +531,7 @@ func lidarrQualityProfiles(req *http.Request) (int, interface{}) {
 	// Get the profiles from lidarr.
 	profiles, err := getLidarr(req).GetQualityProfilesContext(req.Context())
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("getting profiles: %w", err)
+		return apiError(http.StatusInternalServerError, "getting profiles", err)
 	}
 
 	// Format profile ID=>Name into a nice map.
@@ -331,7 +557,7 @@ func lidarrGetQualityProfile(req *http.Request) (int, interface{}) {
 	// Get the profiles from lidarr.
 	profiles, err := getLidarr(req).GetQualityProfilesContext(req.Context())
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("getting profiles: %w", err)
+		return apiError(http.StatusInternalServerError, "getting profiles", err)
 	}
 
 	return http.StatusOK, profiles
@@ -356,13 +582,13 @@ func lidarrAddQualityProfile(req *http.Request) (int, interface{}) {
 	// Extract payload and check for TMDB ID.
 	err := json.NewDecoder(req.Body).Decode(&profile)
 	if err != nil {
-		return http.StatusBadRequest, fmt.Errorf("decoding payload: %w", err)
+		return apiError(http.StatusBadRequest, "decoding payload", err)
 	}
 
-	// Get the profiles from radarr.
+	// Get the profiles from lidarr.
 	id, err := getLidarr(req).AddQualityProfileContext(req.Context(), &profile)
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("adding profile: %w", err)
+		return apiError(http.StatusInternalServerError, "adding profile", err)
 	}
 
 	return http.StatusOK, id
@@ -389,7 +615,7 @@ func lidarrUpdateQualityProfile(req *http.Request) (int, interface{}) {
 	// Extract payload and check for TMDB ID.
 	err := json.NewDecoder(req.Body).Decode(&profile)
 	if err != nil {
-		return http.StatusBadRequest, fmt.Errorf("decoding payload: %w", err)
+		return apiError(http.StatusBadRequest, "decoding payload", err)
 	}
 
 	profile.ID, _ = strconv.ParseInt(mux.Vars(req)["profileID"], mnd.Base10, mnd.Bits64)
@@ -397,10 +623,10 @@ func lidarrUpdateQualityProfile(req *http.Request) (int, interface{}) {
 		return http.StatusUnprocessableEntity, ErrNonZeroID
 	}
 
-	// Get the profiles from radarr.
-	err = getLidarr(req).UpdateQualityProfileContext(req.Context(), &profile)
+	// Get the profiles from lidarr.
+	_, err = getLidarr(req).UpdateQualityProfileContext(req.Context(), &profile)
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("updating profile: %w", err)
+		return apiError(http.StatusInternalServerError, "updating profile", err)
 	}
 
 	return http.StatusOK, "OK"
@@ -420,7 +646,7 @@ func lidarrRootFolders(req *http.Request) (int, interface{}) {
 	// Get folder list from Lidarr.
 	folders, err := getLidarr(req).GetRootFoldersContext(req.Context())
 	if err != nil {
-		return http.StatusInternalServerError, fmt.Errorf("getting folders: %w", err)
+		return apiError(http.StatusInternalServerError, "getting folders", err)
 	}
 
 	// Format folder list into a nice path=>freesSpace map.
@@ -448,7 +674,7 @@ func lidarrRootFolders(req *http.Request) (int, interface{}) {
 func lidarrSearchAlbum(req *http.Request) (int, interface{}) {
 	albums, err := getLidarr(req).GetAlbumContext(req.Context(), "")
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("getting albums: %w", err)
+		return apiError(http.StatusServiceUnavailable, "getting albums", err)
 	}
 
 	type albumData struct {
@@ -522,7 +748,7 @@ func albumSearch(query, title string, releases []*lidarr.Release) bool {
 func lidarrGetTags(req *http.Request) (int, interface{}) {
 	tags, err := getLidarr(req).GetTagsContext(req.Context())
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("getting tags: %w", err)
+		return apiError(http.StatusServiceUnavailable, "getting tags", err)
 	}
 
 	return http.StatusOK, tags
@@ -545,7 +771,7 @@ func lidarrUpdateTag(req *http.Request) (int, interface{}) {
 
 	tag, err := getLidarr(req).UpdateTagContext(req.Context(), &starr.Tag{ID: id, Label: mux.Vars(req)["label"]})
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("updating tag: %w", err)
+		return apiError(http.StatusServiceUnavailable, "updating tag", err)
 	}
 
 	return http.StatusOK, tag.ID
@@ -565,7 +791,7 @@ func lidarrUpdateTag(req *http.Request) (int, interface{}) {
 func lidarrSetTag(req *http.Request) (int, interface{}) {
 	tag, err := getLidarr(req).AddTagContext(req.Context(), &starr.Tag{Label: mux.Vars(req)["label"]})
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("setting tag: %w", err)
+		return apiError(http.StatusServiceUnavailable, "setting tag", err)
 	}
 
 	return http.StatusOK, tag.ID
@@ -590,14 +816,14 @@ func lidarrUpdateAlbum(req *http.Request) (int, interface{}) {
 
 	err := json.NewDecoder(req.Body).Decode(&album)
 	if err != nil {
-		return http.StatusBadRequest, fmt.Errorf("decoding payload: %w", err)
+		return apiError(http.StatusBadRequest, "decoding payload", err)
 	}
 
-	moveFiles := mux.Vars(req)["moveFiles"] == fmt.Sprint(true)
+	moveFiles := mux.Vars(req)["moveFiles"] == strconv.FormatBool(true)
 
 	_, err = getLidarr(req).UpdateAlbumContext(req.Context(), album.ID, &album, moveFiles)
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("updating album: %w", err)
+		return apiError(http.StatusServiceUnavailable, "updating album", err)
 	}
 
 	return http.StatusOK, mnd.Success
@@ -621,12 +847,12 @@ func lidarrUpdateArtist(req *http.Request) (int, interface{}) {
 
 	err := json.NewDecoder(req.Body).Decode(&artist)
 	if err != nil {
-		return http.StatusBadRequest, fmt.Errorf("decoding payload: %w", err)
+		return apiError(http.StatusBadRequest, "decoding payload", err)
 	}
 
-	_, err = getLidarr(req).UpdateArtistContext(req.Context(), &artist)
+	_, err = getLidarr(req).UpdateArtistContext(req.Context(), &artist, true)
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("updating artist: %w", err)
+		return apiError(http.StatusServiceUnavailable, "updating artist", err)
 	}
 
 	return http.StatusOK, mnd.Success
@@ -645,7 +871,7 @@ func lidarrUpdateArtist(req *http.Request) (int, interface{}) {
 func lidarrGetNotifications(req *http.Request) (int, interface{}) {
 	notifs, err := getLidarr(req).GetNotificationsContext(req.Context())
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("getting notifications: %w", err)
+		return apiError(http.StatusServiceUnavailable, "getting notifications", err)
 	}
 
 	output := []*lidarr.NotificationOutput{}
@@ -659,7 +885,42 @@ func lidarrGetNotifications(req *http.Request) (int, interface{}) {
 	return http.StatusOK, output
 }
 
-// @Description  Updates a Notifcation in Lidarr.
+// @Description  Delete items from the activity queue.
+// @Summary      Delete Queue Items
+// @Tags         Lidarr
+// @Produce      json
+// @Param        instance         path    int64  true  "instance ID"
+// @Param        queueID          path    int64  true  "queue ID to delete"
+// @Param        removeFromClient query   bool  false  "remove download from download client?"
+// @Param        blocklist        query   bool  false  "add item to blocklist?"
+// @Param        skipRedownload   query   bool  false  "skip downloading this again?"
+// @Param        changeCategory   query   bool  false  "tell download client to change categories?"
+// @Success      200  {object} apps.Respond.apiResponse{message=string}  "ok"
+// @Failure      500  {object} apps.Respond.apiResponse{message=string} "instance error"
+// @Failure      404  {object} string "bad token or api key"
+// @Failure      423  {object} string "rate limit reached"
+// @Router       /api/lidarr/{instance}/queue/{queueID} [delete]
+// @Security     ApiKeyAuth
+func lidarrDeleteQueue(req *http.Request) (int, interface{}) {
+	idString := mux.Vars(req)["queueID"]
+	queueID, _ := strconv.ParseInt(idString, mnd.Base10, mnd.Bits64)
+	removeFromClient := req.URL.Query().Get("removeFromClient") == mnd.True
+	opts := &starr.QueueDeleteOpts{
+		RemoveFromClient: &removeFromClient,
+		BlockList:        req.URL.Query().Get("blocklist") == mnd.True,
+		SkipRedownload:   req.URL.Query().Get("skipRedownload") == mnd.True,
+		ChangeCategory:   req.URL.Query().Get("changeCategory") == mnd.True,
+	}
+
+	err := getLidarr(req).DeleteQueueContext(req.Context(), queueID, opts)
+	if err != nil {
+		return apiError(http.StatusInternalServerError, "deleting queue", err)
+	}
+
+	return http.StatusOK, mnd.Deleted + idString
+}
+
+// @Description  Updates a Notification in Lidarr.
 // @Summary      Update Lidarr Notification
 // @Tags         Lidarr
 // @Produce      json
@@ -677,12 +938,12 @@ func lidarrUpdateNotification(req *http.Request) (int, interface{}) {
 
 	err := json.NewDecoder(req.Body).Decode(&notif)
 	if err != nil {
-		return http.StatusBadRequest, fmt.Errorf("decoding payload: %w", err)
+		return apiError(http.StatusBadRequest, "decoding payload", err)
 	}
 
 	_, err = getLidarr(req).UpdateNotificationContext(req.Context(), &notif)
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("updating notification: %w", err)
+		return apiError(http.StatusServiceUnavailable, "updating notification", err)
 	}
 
 	return http.StatusOK, mnd.Success
@@ -706,12 +967,12 @@ func lidarrAddNotification(req *http.Request) (int, interface{}) {
 
 	err := json.NewDecoder(req.Body).Decode(&notif)
 	if err != nil {
-		return http.StatusBadRequest, fmt.Errorf("decoding payload: %w", err)
+		return apiError(http.StatusBadRequest, "decoding payload", err)
 	}
 
 	id, err := getLidarr(req).AddNotificationContext(req.Context(), &notif)
 	if err != nil {
-		return http.StatusServiceUnavailable, fmt.Errorf("adding notification: %w", err)
+		return apiError(http.StatusServiceUnavailable, "adding notification", err)
 	}
 
 	return http.StatusOK, id

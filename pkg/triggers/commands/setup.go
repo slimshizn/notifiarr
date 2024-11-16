@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"sync"
@@ -14,7 +15,7 @@ import (
 
 // Errors produced by this file.
 var (
-	ErrNoCmd = fmt.Errorf("cmd provided without a command configured; fix it")
+	ErrNoCmd = errors.New("cmd provided without a command configured; fix it")
 )
 
 const defaultTimeout = 15 * time.Second
@@ -70,7 +71,8 @@ func (a *Action) List() []*cmdconfig.Config {
 	output := []*cmdconfig.Config{}
 
 	for _, c := range a.cmd.cmdlist {
-		output = append(output, &c.Config)
+		config := c.Config
+		output = append(output, &config)
 	}
 
 	return output

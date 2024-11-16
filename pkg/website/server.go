@@ -3,6 +3,7 @@ package website
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -10,7 +11,8 @@ import (
 
 	"github.com/Notifiarr/notifiarr/pkg/apps"
 	"github.com/Notifiarr/notifiarr/pkg/mnd"
-	"github.com/shirou/gopsutil/v3/host"
+	"github.com/Notifiarr/notifiarr/pkg/private"
+	"github.com/shirou/gopsutil/v4/host"
 	"golift.io/cnfg"
 )
 
@@ -26,10 +28,10 @@ const (
 
 // Errors returned by this library.
 var (
-	ErrNon200          = fmt.Errorf("return code was not 200")
-	ErrInvalidResponse = fmt.Errorf("invalid response")
-	ErrNoChannel       = fmt.Errorf("the website send-data channel is closed")
-	ErrInvalidAPIKey   = fmt.Errorf("configured notifiarr API key is invalid")
+	ErrNon200          = errors.New("return code was not 200")
+	ErrInvalidResponse = errors.New("invalid response")
+	ErrNoChannel       = errors.New("the website send-data channel is closed")
+	ErrInvalidAPIKey   = errors.New("configured notifiarr API key is invalid")
 )
 
 // Config is the input data needed to send payloads to notifiarr.
@@ -39,6 +41,7 @@ type Config struct {
 	BaseURL    string
 	Timeout    cnfg.Duration
 	HostID     string
+	BindAddr   string
 	mnd.Logger // log file writer
 }
 
@@ -53,21 +56,21 @@ type Server struct {
 	stopSendData chan struct{}
 }
 
-func New(c *Config) *Server {
-	c.BaseURL = BaseURL
+func New(config *Config) *Server {
+	config.BaseURL = BaseURL
 
-	if c.Retries < 0 {
-		c.Retries = 0
-	} else if c.Retries == 0 {
-		c.Retries = DefaultRetries
+	if config.Retries < 0 {
+		config.Retries = 0
+	} else if config.Retries == 0 {
+		config.Retries = DefaultRetries
 	}
 
 	return &Server{
-		Config: c,
+		Config: config,
 		// clientInfo:   &ClientInfo{},
 		client: &httpClient{
-			Retries: c.Retries,
-			Logger:  c.Logger,
+			Retries: config.Retries,
+			Logger:  config.Logger,
 			Client:  &http.Client{},
 		},
 		hostInfo:     nil, // must start nil
@@ -95,7 +98,7 @@ func (s *Server) Stop() {
 	s.sendData = nil
 }
 
-// GetData sends data to a notifiarr URL as JSON.
+// GetData sends data to a notifiarr URL as JSON and returns a response.
 func (s *Server) GetData(req *Request) (*Response, error) {
 	s.sdMutex.RLock()
 	defer s.sdMutex.RUnlock()
@@ -120,15 +123,16 @@ func (s *Server) RawGetData(ctx context.Context, req *Request) (*Response, time.
 	return s.sendRequest(ctx, req)
 }
 
-func (s *Server) sendPayload(ctx context.Context, uri string, payload interface{}, log bool) (*Response, error) {
+func (s *Server) sendPayload(ctx context.Context, uri string, payload any, log bool) (*Response, error) {
 	data, err := json.Marshal(payload)
 	if err == nil {
-		var torn map[string]interface{}
+		var torn map[string]any
 		if err := json.Unmarshal(data, &torn); err == nil {
 			if torn["host"], err = s.GetHostInfo(ctx); err != nil {
 				s.Config.Errorf("Host Info Unknown: %v", err)
 			}
 
+			torn["private"] = private.Info()
 			payload = torn
 		}
 	}
@@ -153,7 +157,12 @@ func (s *Server) sendPayload(ctx context.Context, uri string, payload interface{
 		return nil, err
 	}
 
-	return unmarshalResponse(s.Config.BaseURL+uri, code, body)
+	resp, err := unmarshalResponse(s.Config.BaseURL+uri, code, body)
+	if resp != nil {
+		resp.sent = len(post)
+	}
+
+	return resp, err
 }
 
 // SendData puts a send-data request to notifiarr.com into a channel queue.

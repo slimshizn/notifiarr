@@ -7,6 +7,14 @@ import (
 	"golift.io/cnfg"
 )
 
+// This name is hard coded as the service name for Plex.
+const PlexServerName = "Plex Server"
+
+const (
+	starrV3StatusURI = "/api/v3/system/status|X-API-Key:"
+	starrV1StatusURI = "/api/v1/system/status|X-API-Key:"
+)
+
 // collectApps turns app configs into service checks if they have a name.
 func (c *Config) collectApps() []*Service {
 	svcs := []*Service{}
@@ -38,7 +46,7 @@ func (c *Config) collectLidarrApps(svcs []*Service) []*Service {
 			svcs = append(svcs, &Service{
 				Name:     app.Name,
 				Type:     CheckHTTP,
-				Value:    app.URL + "/api/v1/system/status?apikey=" + app.APIKey,
+				Value:    app.URL + starrV1StatusURI + app.APIKey,
 				Expect:   "200",
 				Timeout:  cnfg.Duration{Duration: app.Timeout.Duration},
 				Interval: interval,
@@ -65,7 +73,7 @@ func (c *Config) collectProwlarrApps(svcs []*Service) []*Service {
 			svcs = append(svcs, &Service{
 				Name:     app.Name,
 				Type:     CheckHTTP,
-				Value:    app.URL + "/api/v1/system/status?apikey=" + app.APIKey,
+				Value:    app.URL + starrV1StatusURI + app.APIKey,
 				Expect:   "200",
 				Timeout:  cnfg.Duration{Duration: app.Timeout.Duration},
 				Interval: interval,
@@ -92,7 +100,7 @@ func (c *Config) collectRadarrApps(svcs []*Service) []*Service {
 			svcs = append(svcs, &Service{
 				Name:     app.Name,
 				Type:     CheckHTTP,
-				Value:    app.URL + "/api/v3/system/status?apikey=" + app.APIKey,
+				Value:    app.URL + starrV3StatusURI + app.APIKey,
 				Expect:   "200",
 				Timeout:  cnfg.Duration{Duration: app.Timeout.Duration},
 				Interval: interval,
@@ -119,7 +127,7 @@ func (c *Config) collectReadarrApps(svcs []*Service) []*Service {
 			svcs = append(svcs, &Service{
 				Name:     app.Name,
 				Type:     CheckHTTP,
-				Value:    app.URL + "/api/v1/system/status?apikey=" + app.APIKey,
+				Value:    app.URL + starrV1StatusURI + app.APIKey,
 				Expect:   "200",
 				Timeout:  cnfg.Duration{Duration: app.Timeout.Duration},
 				Interval: interval,
@@ -146,7 +154,7 @@ func (c *Config) collectSonarrApps(svcs []*Service) []*Service {
 			svcs = append(svcs, &Service{
 				Name:     app.Name,
 				Type:     CheckHTTP,
-				Value:    app.URL + "/api/v3/system/status?apikey=" + app.APIKey,
+				Value:    app.URL + starrV3StatusURI + app.APIKey,
 				Expect:   "200",
 				Timeout:  cnfg.Duration{Duration: app.Timeout.Duration},
 				Interval: interval,
@@ -289,6 +297,35 @@ func (c *Config) collectDownloadApps(svcs []*Service) []*Service {
 		}
 	}
 
+	// Transmission instances.
+	for _, app := range c.Apps.Transmission {
+		if !app.Enabled() || app.Name == "" || app.Interval.Duration < 0 {
+			continue
+		}
+
+		interval := app.Interval
+		if interval.Duration == 0 {
+			interval.Duration = DefaultCheckInterval
+		}
+
+		expect := "401"
+		if app.User == "" {
+			expect = "409"
+		}
+
+		if app.Name != "" {
+			svcs = append(svcs, &Service{
+				Name:     app.Name,
+				Type:     CheckHTTP,
+				Value:    app.URL,
+				Expect:   expect, // no 200 from RPC endpoint.
+				Timeout:  cnfg.Duration{Duration: app.Timeout.Duration},
+				Interval: interval,
+				validSSL: app.ValidSSL,
+			})
+		}
+	}
+
 	return svcs
 }
 
@@ -329,9 +366,9 @@ func (c *Config) collectPlexApp(svcs []*Service) []*Service {
 	}
 
 	svcs = append(svcs, &Service{
-		Name:     "Plex Server",
+		Name:     PlexServerName,
 		Type:     CheckHTTP,
-		Value:    app.URL + "?X-Plex-Token=" + app.Token,
+		Value:    app.URL + "|X-Plex-Token:" + app.Token,
 		Expect:   "200",
 		Timeout:  app.Timeout,
 		Interval: interval,

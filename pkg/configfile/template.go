@@ -40,20 +40,24 @@ const tmpl = `###############################################
 ###############################################
 
 ## This API key must be copied from your notifiarr.com account.
-{{if .APIKey}}api_key = "{{.APIKey}}"{{else}}api_key = "api-key-from-notifiarr.com"{{end}}{{if .ExKeys}}
-extra_keys = [{{range $s := .ExKeys}}"{{$s}}",{{end}}]{{end}}
+{{if .APIKey}}api_key = '''{{.APIKey}}'''{{else}}api_key = "api-key-from-notifiarr.com"{{end}}{{if .ExKeys}}
+extra_keys = [{{range $s := .ExKeys}}'''{{$s}}''',{{end}}]{{end}}
 
-## Setting a UI password enables the human accessible web GUI. Must be at least 9 characters.
+## Setting a UI password properly secures the Web UI. Must be at least 9 characters.
 ## The default username is admin; change it by setting ui_password to "username:password"
 ## Set to "webauth" to disable the login form and use only proxy authentication. See upstreams, below.
-## Your proxy auth must pass x-webauth-user header if you set this to "webauth".
-ui_password = "{{.UIPassword}}"
+## Your auth proxy must pass the x-webauth-user header if you set this to "webauth".
+## You may also set a custom auth header by setting to "webauth:<header>" e.g. "webauth:remote-user"
+## Disable auth by setting this to "noauth". Not recommended and requires "upstreams" being set.
+## If you leave this unset the password will be set to the API key defined at the top of this file.
+## Changing the password in the Web UI encrypts it, and that is recommended.
+ui_password = '''{{.UIPassword}}'''
 
 ## The ip:port to listen on for incoming HTTP requests. 0.0.0.0 means all/any IP and is recommended!
 ## You may use "127.0.0.1:5454" to listen only on localhost; good if using a local proxy.
 ## This is used to receive Plex webhooks and Media Request commands.
 ##
-bind_addr = "{{.BindAddr}}"
+bind_addr = '''{{.BindAddr}}'''
 
 {{- if or (eq os "windows") (force)}}
 
@@ -62,6 +66,11 @@ bind_addr = "{{.BindAddr}}"
 ## You may also set it to a Go duration like "12h" or "72h".
 ## THIS ONLY WORKS ON WINDOWS
 {{if .AutoUpdate}}auto_update = "{{.AutoUpdate}}"{{else}}auto_update = "off"{{end}}
+{{- if .UnstableCh}}
+
+## Setting this to true uses the unstable website instead of GitHub for auto updates.
+unstable_ch = true
+{{- end}}
 {{- end}}
 
 ## Quiet makes the app not log anything to output.
@@ -75,16 +84,17 @@ quiet = {{.Quiet}}
 debug = {{.Debug}}
 max_body = {{.MaxBody}} # maximum body size for debug logs. 0 = no limit.
 
+{{- if not force}}
+
 ## HostID is used to uniquely identify this client's system.
 ## Do not set or change this unless you have a good reason.
 ## Do not copy this value to another server, every client must be unique.
-##
-host_id = "{{.HostID}}"
+host_id = "{{.HostID}}"{{end}}
 
 ## All API paths start with /api. This does not affect incoming /plex webhooks.
 ## Change it to /somethingelse/api by setting urlbase to "/somethingelse"
 ##
-urlbase = "{{.URLBase}}"
+urlbase = '''{{.URLBase}}'''
 
 ## Allowed upstream networks. Networks here are allowed to send two special headers:
 ## (1) x-forwarded-for (2) x-webauth-user
@@ -100,17 +110,17 @@ urlbase = "{{.URLBase}}"
 ## If you provide a cert and key file (pem) paths, this app will listen with SSL/TLS.
 ## Uncomment both lines and add valid file paths. Make sure this app can read them.
 ##
-{{if .SSLKeyFile}}ssl_key_file  = '{{.SSLKeyFile}}'{{else}}#ssl_key_file  = '/path/to/cert.key'{{end}}
-{{if .SSLCrtFile}}ssl_cert_file = '{{.SSLCrtFile}}'{{else}}#ssl_cert_file = '/path/to/cert.key'{{end}}
+{{if .SSLKeyFile}}ssl_key_file  = '''{{.SSLKeyFile}}'''{{else}}#ssl_key_file  = '/path/to/cert.key'{{end}}
+{{if .SSLCrtFile}}ssl_cert_file = '''{{.SSLCrtFile}}'''{{else}}#ssl_cert_file = '/path/to/cert.key'{{end}}
 
 ## If you set these, logs will be written to these files.
 ## If blank on windows or macOS, log file paths are chosen for you.
-{{if .LogFile}}log_file = '{{.LogFile}}'{{else}}#log_file = '~/.notifiarr/notifiarr.log'{{end}}
-{{if .HTTPLog}}http_log = '{{.HTTPLog}}'{{else}}#http_log = '~/.notifiarr/notifiarr.http.log'{{end}}{{if or .LogConfig.DebugLog .Debug}}
+{{if .LogFile}}log_file = '''{{.LogFile}}'''{{else}}#log_file = '~/.notifiarr/notifiarr.log'{{end}}
+{{if .HTTPLog}}http_log = '''{{.HTTPLog}}'''{{else}}#http_log = '~/.notifiarr/notifiarr.http.log'{{end}}{{if or .LogConfig.DebugLog .Debug}}
 ##
 ## Debug Log is optional. By default, debug logs write to the app log (above).
 ## Change that by setting a debug log file path here.
-{{if .LogConfig.DebugLog}}debug_log = '{{.LogConfig.DebugLog}}'{{else}}#debug_log = '~/.notifiarr/debug.log'{{end}}{{end}}
+{{if .LogConfig.DebugLog}}debug_log = '''{{.LogConfig.DebugLog}}'''{{else}}#debug_log = '~/.notifiarr/debug.log'{{end}}{{end}}
 ##
 ## Set this to the number of megabytes to rotate files.
 log_file_mb = {{.LogFileMb}}
@@ -121,6 +131,10 @@ log_files = {{.LogFiles}}
 ## Unix file mode for new log files. Umask also affects this.
 ## Missing, blank or 0 uses default of 0600. Permissive is 0644. Ignored by Windows.
 file_mode = "{{.FileMode.String}}"
+
+## Disallow the website from triggering (log file) uploads. Sometimes an admin needs to see client
+## logs while diagnosing problems. You can disable this ability by setting no_uploads to true.
+no_uploads = {{.NoUploads}}
 
 ## Web server and website timeout.
 ##
@@ -157,15 +171,16 @@ retries = {{.Retries}}
 ## Setting any application timeout to "-1s" will disable that application.
 
 {{if .Lidarr}}{{range .Lidarr}}[[lidarr]]
-  name     = "{{.Name}}"
-  url      = "{{.URL}}"
-  api_key  = "{{.APIKey}}"{{if .Username}}
-  username = "{{.Username}}"
-  password = "{{.Password}}"{{end}}{{if .HTTPUser}}
-  http_user = "{{.HTTPUser}}"
-  http_pass = "{{.HTTPPass}}"{{end}}
+  name     = '''{{.Name}}'''
+  url      = '''{{.URL}}'''
+  api_key  = '''{{.APIKey}}'''{{if .Username}}
+  username = '''{{.Username}}'''
+  password = '''{{.Password}}'''{{end}}{{if .HTTPUser}}
+  http_user = '''{{.HTTPUser}}'''
+  http_pass = '''{{.HTTPPass}}'''{{end}}
   interval = "{{.Interval}}" # Service check duration (if name is not empty).
   timeout  = "{{.Timeout}}"
+  deletes  = {{.Deletes}}
   {{- if .ValidSSL}}
   valid_ssl = true
   {{- end}}
@@ -178,13 +193,13 @@ retries = {{.Retries}}
 
 
 {{end}}{{if .Prowlarr}}{{range .Prowlarr}}[[prowlarr]]
-  name     = "{{.Name}}"
-  url      = "{{.URL}}"
-  api_key  = "{{.APIKey}}"{{if .Username}}
-  username = "{{.Username}}"
-  password = "{{.Password}}"{{end}}{{if .HTTPUser}}
-  http_user = "{{.HTTPUser}}"
-  http_pass = "{{.HTTPPass}}"{{end}}
+  name     = '''{{.Name}}'''
+  url      = '''{{.URL}}'''
+  api_key  = '''{{.APIKey}}'''{{if .Username}}
+  username = '''{{.Username}}'''
+  password = '''{{.Password}}'''{{end}}{{if .HTTPUser}}
+  http_user = '''{{.HTTPUser}}'''
+  http_pass = '''{{.HTTPPass}}'''{{end}}
   interval = "{{.Interval}}" # Service check duration (if name is not empty).
   timeout  = "{{.Timeout}}"
   {{- if .ValidSSL}}
@@ -199,15 +214,16 @@ retries = {{.Retries}}
 
 
 {{end}}{{if .Radarr}}{{range .Radarr}}[[radarr]]
-  name     = "{{.Name}}"
-  url      = "{{.URL}}"
-  api_key  = "{{.APIKey}}"{{if .Username}}
-  username = "{{.Username}}"
-  password = "{{.Password}}"{{end}}{{if .HTTPUser}}
-  http_user = "{{.HTTPUser}}"
-  http_pass = "{{.HTTPPass}}"{{end}}
+  name     = '''{{.Name}}'''
+  url      = '''{{.URL}}'''
+  api_key  = '''{{.APIKey}}'''{{if .Username}}
+  username = '''{{.Username}}'''
+  password = '''{{.Password}}'''{{end}}{{if .HTTPUser}}
+  http_user = '''{{.HTTPUser}}'''
+  http_pass = '''{{.HTTPPass}}'''{{end}}
   interval = "{{.Interval}}" # Service check duration (if name is not empty).
   timeout  = "{{.Timeout}}"
+  deletes  = {{.Deletes}}
   {{- if .ValidSSL}}
   valid_ssl = true
   {{- end}}
@@ -220,15 +236,16 @@ retries = {{.Retries}}
 
 
 {{end}}{{if .Readarr}}{{range .Readarr}}[[readarr]]
-  name     = "{{.Name}}"
-  url      = "{{.URL}}"
-  api_key  = "{{.APIKey}}"{{if .Username}}
-  username = "{{.Username}}"
-  password = "{{.Password}}"{{end}}{{if .HTTPUser}}
-  http_user = "{{.HTTPUser}}"
-  http_pass = "{{.HTTPPass}}"{{end}}
+  name     = '''{{.Name}}'''
+  url      = '''{{.URL}}'''
+  api_key  = '''{{.APIKey}}'''{{if .Username}}
+  username = '''{{.Username}}'''
+  password = '''{{.Password}}'''{{end}}{{if .HTTPUser}}
+  http_user = '''{{.HTTPUser}}'''
+  http_pass = '''{{.HTTPPass}}'''{{end}}
   interval = "{{.Interval}}" # Service check duration (if name is not empty).
   timeout  = "{{.Timeout}}"
+  deletes  = {{.Deletes}}
   {{- if .ValidSSL}}
   valid_ssl = true
   {{- end}}
@@ -241,15 +258,16 @@ retries = {{.Retries}}
 
 
 {{end}}{{if .Sonarr}}{{range .Sonarr}}[[sonarr]]
-  name     = "{{.Name}}"
-  url      = "{{.URL}}"
-  api_key  = "{{.APIKey}}"{{if .Username}}
-  username = "{{.Username}}"
-  password = "{{.Password}}"{{end}}{{if .HTTPUser}}
-  http_user = "{{.HTTPUser}}"
-  http_pass = "{{.HTTPPass}}"{{end}}
+  name     = '''{{.Name}}'''
+  url      = '''{{.URL}}'''
+  api_key  = '''{{.APIKey}}'''{{if .Username}}
+  username = '''{{.Username}}'''
+  password = '''{{.Password}}'''{{end}}{{if .HTTPUser}}
+  http_user = '''{{.HTTPUser}}'''
+  http_pass = '''{{.HTTPPass}}'''{{end}}
   interval = "{{.Interval}}" # Service check duration (if name is not empty).
   timeout  = "{{.Timeout}}"
+  deletes  = {{.Deletes}}
   {{- if .ValidSSL}}
   valid_ssl = true
   {{- end}}
@@ -266,9 +284,9 @@ retries = {{.Retries}}
 # Download Client Configs (below) are used for dashboard state and service checks.
 
 {{if .Deluge}}{{range .Deluge }}[[deluge]]
-  name     = "{{.Name}}"
-  url      = "{{.Config.URL}}"
-  password = "{{.Password}}"
+  name     = '''{{.Name}}'''
+  url      = '''{{.Config.URL}}'''
+  password = '''{{.Password}}'''
   interval = "{{.Interval}}" # Service check duration (if name is not empty).
   timeout  = "{{.Timeout}}"
   {{- if .ValidSSL}}
@@ -283,10 +301,10 @@ retries = {{.Retries}}
 
 
 {{end}}{{if .Qbit}}{{range .Qbit}}[[qbit]]
-  name     = "{{.Name}}"
-  url      = "{{.URL}}"
-  user     = "{{.User}}"
-  pass     = "{{.Pass}}"
+  name     = '''{{.Name}}'''
+  url      = '''{{.URL}}'''
+  user     = '''{{.User}}'''
+  pass     = '''{{.Pass}}'''
   interval = "{{.Interval}}" # Service check duration (if name is not empty).
   timeout  = "{{.Timeout}}"
   {{- if .ValidSSL}}
@@ -302,10 +320,10 @@ retries = {{.Retries}}
 
 
 {{end}}{{if .Rtorrent}}{{range .Rtorrent}}[[rtorrent]]
-  name     = "{{.Name}}"
-  url      = "{{.URL}}"
-  user     = "{{.User}}"
-  pass     = "{{.Pass}}"
+  name     = '''{{.Name}}'''
+  url      = '''{{.URL}}'''
+  user     = '''{{.User}}'''
+  pass     = '''{{.Pass}}'''
   interval = "{{.Interval}}" # Service check duration (if name is not empty).
   timeout  = "{{.Timeout}}"
   {{- if .ValidSSL}}
@@ -320,11 +338,30 @@ retries = {{.Retries}}
 #pass     = ""
 
 
+{{end}}{{if .Transmission}}{{range .Transmission}}[[transmission]]
+  name     = '''{{.Name}}'''
+  url      = '''{{.URL}}'''
+  user     = '''{{.User}}'''
+  pass     = '''{{.Pass}}'''
+  interval = "{{.Interval}}" # Service check duration (if name is not empty).
+  timeout  = "{{.Timeout}}"
+  {{- if .ValidSSL}}
+  valid_ssl = true
+  {{- end}}
+
+{{end}}
+{{else}}#[[transmission]]
+#name     = ""  # Set a name to enable checks of your service.
+#url      = "http://transmission:9091/transmission/rpc"
+#user     = ""
+#pass     = ""
+
+
 {{end}}{{if .NZBGet}}{{range .NZBGet}}[[nzbget]]
-  name     = "{{.Name}}"
-  url      = "{{.URL}}"
-  user     = "{{.User}}"
-  pass     = "{{.Pass}}"
+  name     = '''{{.Name}}'''
+  url      = '''{{.URL}}'''
+  user     = '''{{.User}}'''
+  pass     = '''{{.Pass}}'''
   interval = "{{.Interval}}" # Service check duration (if name is not empty).
   timeout  = "{{.Timeout}}"
   {{- if .ValidSSL}}
@@ -340,9 +377,9 @@ retries = {{.Retries}}
 
 
 {{end}}{{if .SabNZB}}{{range .SabNZB}}[[sabnzbd]]
-  name     = "{{.Name}}"
-  url      = "{{.URL}}"
-  api_key  = "{{.APIKey}}"
+  name     = '''{{.Name}}'''
+  url      = '''{{.URL}}'''
+  api_key  = '''{{.APIKey}}'''
   interval = "{{.Interval}}" # Service check duration (if name is not empty).
   timeout  = "{{.Timeout}}"
   {{- if .ValidSSL}}
@@ -365,8 +402,8 @@ retries = {{.Retries}}
 ## Find your token: https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/
 ##
 {{if and .Plex (not force)}}[plex]
-  url     = "{{.Plex.URL}}"   # Your plex URL
-  token   = "{{.Plex.Token}}"   # your plex token; get this from a web inspector
+  url     = '''{{.Plex.URL}}'''   # Your plex URL
+  token   = '''{{.Plex.Token}}'''   # your plex token; get this from a web inspector
   interval = "{{.Plex.Interval}}" # Service check duration (if name is not empty).
   timeout = "{{.Plex.Timeout}}"  # how long to wait for HTTP responses
   {{- if .Plex.ValidSSL}}
@@ -385,8 +422,8 @@ retries = {{.Retries}}
 # Must uncomment [tautulli], 'api_key' and 'url' at a minimum.
 {{if and .Tautulli (not force)}}
 [tautulli]
-  name     = "{{.Tautulli.Name}}" # only set a name to enable service checks.
-  url      = "{{.Tautulli.URL}}" # Your Tautulli URL
+  name     = '''{{.Tautulli.Name}}''' # only set a name to enable service checks.
+  url      = '''{{.Tautulli.URL}}''' # Your Tautulli URL
   api_key  = "{{.Tautulli.APIKey}}" # your tautulli api key; get this from settings
   timeout  = "{{.Tautulli.Timeout}}" # how long to wait for HTTP responses
   interval = "{{.Tautulli.Interval}}" # how often to send service checks
@@ -412,10 +449,10 @@ retries = {{.Retries}}
 [[snapshot.mysql]]
   name     = "{{.Name}}"
   host     = "{{.Host}}"
-	user     = "{{.User}}"
-	pass     = "{{.Pass}}"
+  user     = "{{.User}}"
+  pass     = '''{{.Pass}}'''
   interval = "{{.Interval}}" # Service check duration (if name is not empty).
-	timeout  = "{{.Timeout}}"
+  timeout  = "{{.Timeout}}"
 {{end}}
 {{else}}
 #[[snapshot.mysql]]
@@ -434,9 +471,9 @@ retries = {{.Retries}}
 # SMI Path is found automatically if left blank. Set it to path to nvidia-smi (nvidia-smi.exe on Windows).
 
 [snapshot.nvidia]
-disabled = {{.Snapshot.Nvidia.Disabled}}
-smi_path = '''{{.Snapshot.Nvidia.SMIPath}}'''
-bus_ids  = [{{range $s := .Snapshot.Nvidia.BusIDs}}"{{$s}}",{{end}}]
+  disabled = {{.Snapshot.Nvidia.Disabled}}
+  smi_path = '''{{.Snapshot.Nvidia.SMIPath}}'''
+  bus_ids  = [{{range $s := .Snapshot.Nvidia.BusIDs}}"{{$s}}",{{end}}]
 
 ##################
 # Service Checks #
@@ -480,8 +517,8 @@ bus_ids  = [{{range $s := .Snapshot.Nvidia.BusIDs}}"{{$s}}",{{end}}]
 [[service]]
   name     = "{{.Name}}"
   type     = "{{.Type}}"
-  check    = '{{.Value}}'
-  expect   = "{{.Expect}}"
+  check    = '''{{.Value}}'''
+  expect   = '''{{.Expect}}'''
   timeout  = "{{.Timeout}}"
   interval = "{{.Interval}}"
 {{end}}{{end}}
@@ -507,7 +544,7 @@ bus_ids  = [{{range $s := .Snapshot.Nvidia.BusIDs}}"{{$s}}",{{end}}]
 {{- range $item := .WatchFiles}}{{if $item}}
 
 [[watch_file]]
-  path  = '{{$item.Path}}'{{if $item.Skip}}
+  path  = '''{{$item.Path}}'''{{if $item.Skip}}
   skip  = '''{{$item.Skip}}'''{{end}}{{if $item.Regexp}}
   regex = '''{{$item.Regexp}}'''{{end}}{{if $item.Poll}}
   poll  = true{{end}}{{if $item.Pipe}}
@@ -542,6 +579,7 @@ bus_ids  = [{{range $s := .Snapshot.Nvidia.BusIDs}}"{{$s}}",{{end}}]
 
 [[command]]
   name    = '{{$item.Name}}'
+  hash    = '{{$item.Hash}}'
   command = '''{{toml $item.Command}}'''
   shell   = {{$item.Shell}}
   log     = {{$item.Log}}

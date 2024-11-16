@@ -178,9 +178,18 @@ function loadMonitorTable(table) {
 
 function jsLoader()
 {
-    let path        = '';
-    let script      = '';
-    const files     = ['navigation', 'golists', 'fileViewer', 'services', 'triggers', 'websocket', 'filebrowser'];
+    let path    = '';
+    let script  = '';
+    const files = [
+        'tunnel', 
+        'navigation', 
+        'golists', 
+        'fileViewer',
+        'services',
+        'triggers', 
+        'websocket', 
+        'filebrowser',
+    ];
 
     for (const file of files) {
         path        = FilesBase+'/js/' + file + '.js';
@@ -348,7 +357,11 @@ function savePendingChanges()
                                 clearInterval(ping);
                                 setTimeout(function() {
                                     location.reload();
-                                }, 500);
+                                }, 1000);
+                            } else {
+                                setTimeout(function() {
+                                    location.reload();
+                                }, 2000);
                             }
                         }
                     });
@@ -382,7 +395,8 @@ function saveProfileChanges()
         data: fields,
         success: function (data){
             $('#current-username').html($('#NewUsername').val()); // update the html username.
-            toast('Profile Saved', data, 'success');
+            toast('Trust Profile Saved', 'Page will refresh after reload finishes. '+data, 'success', 60000);
+            setTimeout(reloadTimeout, 500);
         },
         error: function (response, status, error) {
             if (response.responseText === undefined) {
@@ -394,6 +408,7 @@ function saveProfileChanges()
         }
     });
 }
+
 // ---------------------------------------------------------------------------------------------
 
 function getCharacterLength (str)

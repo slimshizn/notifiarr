@@ -10,11 +10,11 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/shirou/gopsutil/v3/cpu"
-	"github.com/shirou/gopsutil/v3/host"
-	"github.com/shirou/gopsutil/v3/load"
-	"github.com/shirou/gopsutil/v3/mem"
-	"github.com/shirou/gopsutil/v3/process"
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/host"
+	"github.com/shirou/gopsutil/v4/load"
+	"github.com/shirou/gopsutil/v4/mem"
+	"github.com/shirou/gopsutil/v4/process"
 )
 
 // Processes allows us to sort a process list.
@@ -65,13 +65,15 @@ func (s *Snapshot) getMemoryUsageShared(ctx context.Context) error {
 }
 
 // GetLocalData collects current username, logged in user and host info.
-func (s *Snapshot) GetLocalData(ctx context.Context) (errs []error) {
+func (s *Snapshot) GetLocalData(ctx context.Context) []error {
 	u, err := user.Current()
 	if err != nil {
 		s.System.Username = "uid:" + strconv.Itoa(os.Getuid())
 	} else {
 		s.System.Username = u.Username
 	}
+
+	var errs []error
 
 	if err := s.GetUsers(ctx); err != nil &&
 		!errors.Is(err, os.ErrNotExist) && !errors.Is(err, os.ErrPermission) {
@@ -106,7 +108,7 @@ func (s *Snapshot) GetProcesses(ctx context.Context, count int) error {
 		_, _ = proc.PercentWithContext(ctx, 0)
 	}
 
-	time.Sleep(4 * time.Second) //nolint:gomnd
+	time.Sleep(4 * time.Second) //nolint:mnd
 
 	for idx, proc := range procs {
 		s.Processes[idx].CPUPercent, _ = proc.PercentWithContext(ctx, 0)
